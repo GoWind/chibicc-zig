@@ -47,7 +47,10 @@ const Stream = struct {
         }
     }
 };
-
+// Print an error with a pointer pointing to `stream_p.*[loc]`
+fn error_input_stream(stream_p: *[*:0]u8, loc: usize) void {}
+// Print an error with a pointer pointing to `stream_p.*[loc]`
+fn error_token(stream_p: *[*:0]u8, t: Token) void {}
 fn tokenize(stream_p: *[*:0]u8, list: *TokenList) !void {
     var stream = stream_p.*;
     while (stream[0] != 0) {
