@@ -19,6 +19,6 @@ pub fn main() anyerror!void {
     defer arena.deinit();
     var allocator = arena.allocator();
     var token_stream = try tokenizer.text_to_stream(&std.os.argv[1], allocator);
-    var top_node = try codegen.stream_to_ast(&token_stream, allocator);
-    try codegen.generateProgram(top_node, allocator);
+    var top_node = try codegen.parse(&token_stream, allocator);
+    try codegen.codegen(top_node, allocator);
 }
