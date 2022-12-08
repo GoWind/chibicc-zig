@@ -3,7 +3,7 @@ const Allocator = std.mem.Allocator;
 const span = std.mem.span;
 const panic = std.debug.panic;
 const ascii = std.ascii;
-pub const TokenKind = enum { punct, num, eof };
+pub const TokenKind = enum { punct, num, eof, ident };
 pub const Token = union(TokenKind) {
     const Self = @This();
     punct: struct {
@@ -11,6 +11,9 @@ pub const Token = union(TokenKind) {
     },
     num: struct { val: i32 },
     eof: void,
+    ident: struct {
+        ptr: []const u8,
+    },
 
     pub fn equal(self: *Self, other: *const Token) bool {
         if (std.mem.eql(u8, @tagName(self.*), @tagName(other.*)) == false) {
@@ -38,6 +41,14 @@ pub const Token = union(TokenKind) {
         return std.mem.eql(u8, ptr_self, ptr_other);
     }
 
+    fn equal_idents(self: *Self, other: *const Token) bool {
+        var struct_self = @field(self, "ident");
+        var struct_other = @field(other, "ident");
+        var ptr_self = @field(struct_self, "ptr");
+        var ptr_other = @field(struct_other, "ptr");
+        return std.mem.eql(u8, ptr_self, ptr_other);
+    }
+
     fn equal_nums(self: *Self, other: *const Token) bool {
         var struct_self = @field(self, "num");
         var struct_other = @field(other, "num");
@@ -56,6 +67,9 @@ pub const Token = union(TokenKind) {
             },
             TokenKind.eof => {
                 try std.fmt.format(out_stream, "TokenKind.eof \n", .{});
+            },
+            TokenKind.ident => |v| {
+                try std.fmt.format(out_stream, "TokenKind.punct {s}\n", .{v.ptr});
             },
         }
     }
@@ -102,7 +116,7 @@ pub const Stream = struct {
     pub fn skip(self: *Self, t: *const Token) void {
         if (self.is_eof()) {
             // Guess I should panic ?
-            panic("Expected {}, found EOF", .{t});
+            panic("Expected {?}, found EOF", .{t});
         }
         var top_token = self.top();
         if (top_token.equal(t) == true) {
@@ -121,10 +135,16 @@ pub fn tokenize(stream_p: *[*:0]u8, list: *TokenList) !void {
         if (ascii.isSpace(stream[0]) == true) {
             stream += 1;
             continue;
+            // Numbers
         } else if (ascii.isDigit(stream[0]) == true) {
             //notice that we are modifying stream here
             var number = strtol(&stream);
             try list.append(Token{ .num = .{ .val = number.? } });
+            // Identifiers
+        } else if (ascii.isAlpha(stream[0])) {
+            try list.append(Token{ .ident = .{ .ptr = stream[0..1] } });
+            stream += 1;
+            // Operators
         } else if (readPunct(span(stream)) > 0) {
             var punct_len = readPunct(span(stream));
             try list.append(Token{ .punct = .{ .ptr = stream[0..punct_len] } });

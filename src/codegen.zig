@@ -5,7 +5,7 @@ const Stream = tokenizer.Stream;
 const Allocator = std.mem.Allocator;
 const span = std.mem.span;
 const panic = std.debug.panic;
-const all_valid_chars = "()/*+-==!=<<=>>=;";
+const all_valid_chars = "()/*+-==!=<<=>>=;=";
 const stdout = std.io.getStdOut();
 pub const LEFT_PAREN = Token{ .punct = .{ .ptr = span(all_valid_chars[0..1]) } };
 pub const RIGHT_PAREN = Token{ .punct = .{ .ptr = span(all_valid_chars[1..2]) } };
@@ -20,10 +20,11 @@ pub const LTE = Token{ .punct = .{ .ptr = span(all_valid_chars[11..13]) } };
 pub const GT = Token{ .punct = .{ .ptr = span(all_valid_chars[13..14]) } };
 pub const GTE = Token{ .punct = .{ .ptr = span(all_valid_chars[14..16]) } };
 pub const SEMICOLON = Token{ .punct = .{ .ptr = span(all_valid_chars[16..17]) } };
+pub const ASSIGN = Token{ .punct = .{ .ptr = span(all_valid_chars[17..18]) } };
 // ** AST Generation ** //
 
 // Code emitter
-const NodeKind = enum { Add, Sub, Mul, Div, Unary, Num, Eq, Neq, Lt, Lte, ExprStmt };
+const NodeKind = enum { Add, Sub, Mul, Div, Unary, Num, Eq, Neq, Lt, Lte, ExprStmt, Assign, Var };
 pub const Node = struct {
     const Self = @This();
     kind: NodeKind,
@@ -31,6 +32,7 @@ pub const Node = struct {
     lhs: ?*Node = null,
     rhs: ?*Node = null,
     val: i32 = 0,
+    name: u8 = ' ',
 
     // self is a pointer into global heap region or a fn-local heap
     fn from_binary(self: *Self, kind: NodeKind, lhs: ?*Node, rhs: ?*Node) void {
@@ -42,6 +44,12 @@ pub const Node = struct {
     }
     fn from_unary(self: *Self, lhs: ?*Node) void {
         self.* = .{ .kind = NodeKind.Unary, .lhs = lhs };
+    }
+    fn from_expr_stmt(self: *Self, lhs: ?*Node) void {
+        self.* = .{ .kind = NodeKind.ExprStmt, .lhs = lhs };
+    }
+    fn from_ident(self: *Self, name: u8) void {
+        self.* = .{ .kind = NodeKind.Var, .name = name };
     }
 };
 
@@ -78,8 +86,19 @@ fn mul(s: *Stream, alloc: Allocator) !*Node {
     return lhs;
 }
 
+fn assign(stream: *Stream, alloc: Allocator) !*Node {
+    var lhs = try equality(stream, alloc);
+    if (stream.top().equal(&ASSIGN)) {
+        stream.consume();
+        var rhs = try assign(stream, alloc);
+        var assign_node = try alloc.create(Node);
+        assign_node.from_binary(NodeKind.Assign, lhs, rhs);
+        return assign_node;
+    }
+    return lhs;
+}
 fn expr(s: *Stream, alloc: Allocator) !*Node {
-    return equality(s, alloc);
+    return assign(s, alloc);
 }
 fn add(s: *Stream, alloc: Allocator) !*Node {
     var lhs = try mul(s, alloc);
@@ -163,6 +182,15 @@ fn primary(s: *Stream, alloc: Allocator) anyerror!*Node {
         s.skip(&RIGHT_PAREN);
         return expression;
     }
+    if (std.mem.eql(u8, @tagName(top_token.*), "ident")) {
+        var struct_top = @field(top_token, "ident");
+        var name = @field(struct_top, "ptr");
+        var variable_node = try alloc.create(Node);
+        variable_node.from_ident(name[0]);
+        s.consume();
+        return variable_node;
+    }
+
     if (std.mem.eql(u8, @tagName(top_token.*), "num")) {
         var struct_top = @field(top_token, "num");
         var val = @field(struct_top, "val");
@@ -172,6 +200,65 @@ fn primary(s: *Stream, alloc: Allocator) anyerror!*Node {
         return num_node;
     } else {
         panic("unexpected token {?} to parse as primary", .{top_token});
+    }
+}
+
+fn expr_statement(s: *Stream, alloc: Allocator) !*Node {
+    var expr_node = try alloc.create(Node);
+    var lhs = try expr(s, alloc);
+    expr_node.from_expr_stmt(lhs);
+    s.skip(&SEMICOLON);
+    return expr_node;
+}
+// Do not not know why we have one xtra layer of
+// indirection to expr_statement
+fn stmt(s: *Stream, alloc: Allocator) !*Node {
+    return expr_statement(s, alloc);
+}
+pub fn parse(s: *Stream, alloc: Allocator) !*Node {
+    var root_node: ?*Node = null;
+    var it = root_node;
+    while (!s.is_eof()) {
+        var next = try stmt(s, alloc);
+        if (root_node == null) {
+            root_node = next;
+            it = root_node;
+        } else {
+            it.?.next = next;
+            it = next;
+        }
+    }
+    return root_node.?;
+}
+
+// In ARM assembler default alignment is a 4-byte boundart
+// .align takes argument `exponent` and alignment = 2 power exponent
+// TODO: push x29 (frame pointer to stack and sub sp by 208)
+// before we start codegen
+const program_header =
+    \\.global _start
+    \\.align 2
+    \\_start:
+    \\ str x29, [sp, -16]
+    \\ sub sp, sp, #16
+    \\ mov x29, sp
+    \\ sub sp, sp, #208
+;
+
+const program_epilogue =
+    \\ add sp, sp, #208
+    \\ ldr x29, [x29]
+    \\ add sp, sp, 16
+    \\ ret
+;
+// At the end of this, X0 will have the addr
+// of the variable being loaded
+fn gen_addr(node: *Node) !void {
+    if (node.kind == NodeKind.Var) {
+        var offset = (node.name - 'a' + 1) * 8;
+        try stdout.writer().print("add x0, x29, #-{}\n", .{offset});
+    } else {
+        panic("Not an lvalue {?}", .{node});
     }
 }
 //TODO: Turn this into a local variable within the `codegen` function
@@ -191,9 +278,18 @@ fn pop(reg: []const u8) !void {
 pub fn gen_expr(node: *Node) !void {
     if (node.kind == NodeKind.Num) {
         try stdout.writer().print("mov X0, {}\n", .{node.val});
+    } else if (node.kind == NodeKind.Var) {
+        try gen_addr(node);
+        try stdout.writer().print("ldr x0, [x0]\n", .{});
     } else if (node.kind == NodeKind.Unary) {
         try gen_expr(node.lhs.?);
         try stdout.writer().print("neg x0, x0\n", .{});
+    } else if (node.kind == NodeKind.Assign) {
+        try gen_addr(node.lhs.?);
+        try push();
+        try gen_expr(node.rhs.?);
+        try pop(span("x1"));
+        try stdout.writer().print("str X0, [X1]\n", .{});
     } else {
         // idea, gen_expr, returns which register the end value of that expr is in
         // we can then use this as an input into the subsequent Add, Sub, Mul, Div
@@ -243,44 +339,6 @@ pub fn gen_expr(node: *Node) !void {
     }
 }
 
-fn expr_statement(s: *Stream, alloc: Allocator) !*Node {
-    var expr_node = try alloc.create(Node);
-    expr_node.next = null;
-    var lhs = try expr(s, alloc);
-    expr_node.kind = NodeKind.ExprStmt;
-    expr_node.lhs = lhs;
-    s.skip(&SEMICOLON);
-    return expr_node;
-}
-// Do not not know why we have one xtra layer of
-// indirection to expr_statement
-fn stmt(s: *Stream, alloc: Allocator) !*Node {
-    return expr_statement(s, alloc);
-}
-pub fn parse(s: *Stream, alloc: Allocator) !*Node {
-    var root_node: ?*Node = null;
-    var it = root_node;
-    while (!s.is_eof()) {
-        var next = try stmt(s, alloc);
-        if (root_node == null) {
-            root_node = next;
-            it = root_node;
-        } else {
-            it.?.next = next;
-            it = next;
-        }
-    }
-    return root_node.?;
-}
-
-// In ARM assembler default alignment is a 4-byte boundart
-// .align takes argument `exponent` and alignment = 2 power exponent
-const program_header =
-    \\.global _start
-    \\.align 2
-    \\_start:
-;
-
 fn gen_stmt(n: *Node) !void {
     if (n.kind == NodeKind.ExprStmt) {
         try gen_expr(n.lhs.?);
@@ -288,10 +346,10 @@ fn gen_stmt(n: *Node) !void {
     }
     panic("Invalid node {any}", .{n});
 }
-pub fn codegen(n: *Node, alloc: Allocator) !void {
+pub fn codegen(n: *Node) !void {
     depth = 0;
-    var program = try std.fmt.allocPrint(alloc, "{s}\n", .{program_header});
-    try stdout.writeAll(program);
+    var stdout_writer = stdout.writer();
+    try stdout_writer.print("{s}\n", .{program_header});
     var maybe_head: ?*Node = n;
     while (maybe_head) |head| {
         depth = 0;
@@ -299,5 +357,5 @@ pub fn codegen(n: *Node, alloc: Allocator) !void {
         std.debug.assert(depth == 0);
         maybe_head = head.next;
     }
-    try stdout.writer().print("ret\n", .{});
+    try stdout_writer.print("{s}\n", .{program_epilogue});
 }
