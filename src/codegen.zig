@@ -32,7 +32,7 @@ pub const Node = struct {
     lhs: ?*Node = null,
     rhs: ?*Node = null,
     val: i32 = 0,
-    name: u8 = ' ',
+    variable: ?*Obj = null,
 
     // self is a pointer into global heap region or a fn-local heap
     fn from_binary(self: *Self, kind: NodeKind, lhs: ?*Node, rhs: ?*Node) void {
@@ -48,35 +48,37 @@ pub const Node = struct {
     fn from_expr_stmt(self: *Self, lhs: ?*Node) void {
         self.* = .{ .kind = NodeKind.ExprStmt, .lhs = lhs };
     }
-    fn from_ident(self: *Self, name: u8) void {
-        self.* = .{ .kind = NodeKind.Var, .name = name };
+    fn from_ident(self: *Self, variable: *Obj) void {
+        self.* = .{ .kind = NodeKind.Var, .variable = variable };
     }
 };
 
-fn unary(stream: *Stream, alloc: Allocator) !*Node {
+fn unary(p: *ParseContext) !*Node {
+    var stream = p.stream;
     var stream_top = stream.top();
     if (stream_top.equal(&PLUS)) {
         stream.consume();
-        return unary(stream, alloc);
+        return unary(p);
     } else if (stream_top.equal(&MINUS)) {
         stream.consume();
-        var lhs = try unary(stream, alloc);
-        var unary_node = try alloc.create(Node);
+        var lhs = try unary(p);
+        var unary_node = try p.alloc.create(Node);
         unary_node.from_unary(lhs);
         return unary_node;
     }
-    return primary(stream, alloc);
+    return primary(p);
 }
-fn mul(s: *Stream, alloc: Allocator) !*Node {
-    var lhs = try unary(s, alloc);
+fn mul(p: *ParseContext) !*Node {
+    var lhs = try unary(p);
     var loop = true;
+    var s = p.stream;
     while (loop == true) {
         var stream_top = s.top();
         if ((stream_top.equal(&MUL) == true) or (stream_top.equal(&DIV) == true)) {
             var op = if (stream_top.equal(&MUL)) NodeKind.Mul else NodeKind.Div;
             s.consume();
-            var rhs = try unary(s, alloc);
-            var expr_node = try alloc.create(Node);
+            var rhs = try unary(p);
+            var expr_node = try p.alloc.create(Node);
             expr_node.from_binary(op, lhs, rhs);
             lhs = expr_node;
         } else {
@@ -86,30 +88,32 @@ fn mul(s: *Stream, alloc: Allocator) !*Node {
     return lhs;
 }
 
-fn assign(stream: *Stream, alloc: Allocator) !*Node {
-    var lhs = try equality(stream, alloc);
+fn assign(p: *ParseContext) !*Node {
+    var lhs = try equality(p);
+    var stream = p.stream;
     if (stream.top().equal(&ASSIGN)) {
         stream.consume();
-        var rhs = try assign(stream, alloc);
-        var assign_node = try alloc.create(Node);
+        var rhs = try assign(p);
+        var assign_node = try p.alloc.create(Node);
         assign_node.from_binary(NodeKind.Assign, lhs, rhs);
         return assign_node;
     }
     return lhs;
 }
-fn expr(s: *Stream, alloc: Allocator) !*Node {
-    return assign(s, alloc);
+fn expr(p: *ParseContext) !*Node {
+    return assign(p);
 }
-fn add(s: *Stream, alloc: Allocator) !*Node {
-    var lhs = try mul(s, alloc);
+fn add(p: *ParseContext) !*Node {
+    var lhs = try mul(p);
     var loop = true;
+    var s = p.stream;
     while (loop == true) {
         var stream_top = s.top();
         if ((stream_top.equal(&PLUS) == true) or (stream_top.equal(&MINUS) == true)) {
             var op = if (stream_top.equal(&PLUS)) NodeKind.Add else NodeKind.Sub;
             s.consume();
-            var rhs = try mul(s, alloc);
-            var expr_node = try alloc.create(Node);
+            var rhs = try mul(p);
+            var expr_node = try p.alloc.create(Node);
             expr_node.from_binary(op, lhs, rhs);
             lhs = expr_node;
         } else {
@@ -118,16 +122,17 @@ fn add(s: *Stream, alloc: Allocator) !*Node {
     }
     return lhs;
 }
-fn equality(stream: *Stream, alloc: Allocator) !*Node {
-    var lhs = try relational(stream, alloc);
+fn equality(p: *ParseContext) !*Node {
+    var lhs = try relational(p);
     var loop = true;
+    var stream = p.stream;
     while (loop) {
         var stream_top = stream.top();
         if (stream_top.equal(&EQEQ) or stream_top.equal(&NOTEQ)) {
             var op = if (stream_top.equal(&EQEQ)) NodeKind.Eq else NodeKind.Neq;
             stream.consume();
-            var rhs = try relational(stream, alloc);
-            var rel_node = try alloc.create(Node);
+            var rhs = try relational(p);
+            var rel_node = try p.alloc.create(Node);
             rel_node.from_binary(op, lhs, rhs);
             lhs = rel_node;
         } else {
@@ -136,35 +141,36 @@ fn equality(stream: *Stream, alloc: Allocator) !*Node {
     }
     return lhs;
 }
-fn relational(stream: *Stream, alloc: Allocator) !*Node {
-    var lhs = try add(stream, alloc);
+fn relational(p: *ParseContext) !*Node {
+    var lhs = try add(p);
     var loop = true;
+    var stream = p.stream;
     while (loop) {
         var stream_top = stream.top();
         if (stream_top.equal(&LT)) {
-            var rel_node = try alloc.create(Node);
+            var rel_node = try p.alloc.create(Node);
             stream.consume();
-            var rhs = try add(stream, alloc);
+            var rhs = try add(p);
             rel_node.from_binary(NodeKind.Lt, lhs, rhs);
             lhs = rel_node;
         } else if (stream_top.equal(&LTE)) {
-            var rel_node = try alloc.create(Node);
+            var rel_node = try p.alloc.create(Node);
             stream.consume();
-            var rhs = try add(stream, alloc);
+            var rhs = try add(p);
             rel_node.from_binary(NodeKind.Lte, lhs, rhs);
             lhs = rel_node;
             // Optimization, we need not have a NodeKind.Gte
             // we can just switch lhs and rhs with the same Lt, Lte ops
         } else if (stream_top.equal(&GT)) {
-            var rel_node = try alloc.create(Node);
+            var rel_node = try p.alloc.create(Node);
             stream.consume();
-            var rhs = try add(stream, alloc);
+            var rhs = try add(p);
             rel_node.from_binary(NodeKind.Lt, rhs, lhs);
             lhs = rel_node;
         } else if (stream_top.equal(&GTE)) {
-            var rel_node = try alloc.create(Node);
+            var rel_node = try p.alloc.create(Node);
             stream.consume();
-            var rhs = try add(stream, alloc);
+            var rhs = try add(p);
             rel_node.from_binary(NodeKind.Lte, rhs, lhs);
             lhs = rel_node;
         } else {
@@ -173,20 +179,23 @@ fn relational(stream: *Stream, alloc: Allocator) !*Node {
     }
     return lhs;
 }
-fn primary(s: *Stream, alloc: Allocator) anyerror!*Node {
+fn primary(p: *ParseContext) anyerror!*Node {
+    var s = p.stream;
     var top_token = s.top();
     if (top_token.equal(&LEFT_PAREN)) {
         // var top_idx = s.pos();
         s.consume();
-        var expression = try expr(s, alloc);
+        var expression = try expr(p);
         s.skip(&RIGHT_PAREN);
         return expression;
     }
     if (std.mem.eql(u8, @tagName(top_token.*), "ident")) {
         var struct_top = @field(top_token, "ident");
         var name = @field(struct_top, "ptr");
-        var variable_node = try alloc.create(Node);
-        variable_node.from_ident(name[0]);
+        var variable = if (find_local_var(name, p.locals)) |local_var| local_var else try Obj.alloc_obj(p.alloc, name);
+        try p.locals.append(variable);
+        var variable_node = try p.alloc.create(Node);
+        variable_node.from_ident(variable);
         s.consume();
         return variable_node;
     }
@@ -194,7 +203,7 @@ fn primary(s: *Stream, alloc: Allocator) anyerror!*Node {
     if (std.mem.eql(u8, @tagName(top_token.*), "num")) {
         var struct_top = @field(top_token, "num");
         var val = @field(struct_top, "val");
-        var num_node = try alloc.create(Node);
+        var num_node = try p.alloc.create(Node);
         num_node.from_num(val);
         s.consume();
         return num_node;
@@ -203,23 +212,26 @@ fn primary(s: *Stream, alloc: Allocator) anyerror!*Node {
     }
 }
 
-fn expr_statement(s: *Stream, alloc: Allocator) !*Node {
-    var expr_node = try alloc.create(Node);
-    var lhs = try expr(s, alloc);
+fn expr_statement(p: *ParseContext) !*Node {
+    var s = p.stream;
+    var expr_node = try p.alloc.create(Node);
+    var lhs = try expr(p);
     expr_node.from_expr_stmt(lhs);
     s.skip(&SEMICOLON);
     return expr_node;
 }
 // Do not not know why we have one xtra layer of
 // indirection to expr_statement
-fn stmt(s: *Stream, alloc: Allocator) !*Node {
-    return expr_statement(s, alloc);
+fn stmt(p: *ParseContext) !*Node {
+    return expr_statement(p);
 }
-pub fn parse(s: *Stream, alloc: Allocator) !*Node {
+pub fn parse(s: *Stream, alloc: Allocator) !*Function {
     var root_node: ?*Node = null;
     var it = root_node;
+    var parse_context = ParseContext{ .stream = s, .alloc = alloc, .locals = ObjList.init(alloc) };
+    //FIXME: When do we deinit locals ?
     while (!s.is_eof()) {
-        var next = try stmt(s, alloc);
+        var next = try stmt(&parse_context);
         if (root_node == null) {
             root_node = next;
             it = root_node;
@@ -228,25 +240,27 @@ pub fn parse(s: *Stream, alloc: Allocator) !*Node {
             it = next;
         }
     }
-    return root_node.?;
+    var f = try alloc.create(Function);
+    f.fnbody = root_node.?;
+    f.locals = parse_context.locals;
+    f.stack_size = 0; //FIXME: What should this be ?
+    return f;
 }
 
 // In ARM assembler default alignment is a 4-byte boundart
 // .align takes argument `exponent` and alignment = 2 power exponent
-// TODO: push x29 (frame pointer to stack and sub sp by 208)
-// before we start codegen
-const program_header =
+
+const fn_prologue =
     \\.global _start
     \\.align 2
     \\_start:
     \\ str x29, [sp, -16]
     \\ sub sp, sp, #16
     \\ mov x29, sp
-    \\ sub sp, sp, #208
 ;
-
-const program_epilogue =
-    \\ add sp, sp, #208
+// each fn's body will sub sp based on the # of local vars after `fn_prologue`
+// similarly each fn will add sp to its original location based on the # of local vars after `fn_epilogue`
+const fn_epilogue =
     \\ ldr x29, [x29]
     \\ add sp, sp, 16
     \\ ret
@@ -255,13 +269,13 @@ const program_epilogue =
 // of the variable being loaded
 fn gen_addr(node: *Node) !void {
     if (node.kind == NodeKind.Var) {
-        var offset = (node.name - 'a' + 1) * 8;
+        var offset = node.variable.?.offset;
+        try stdout.writer().print(";; variable {s} at offset {}\n", .{ node.variable.?.name, offset });
         try stdout.writer().print("add x0, x29, #-{}\n", .{offset});
     } else {
         panic("Not an lvalue {?}", .{node});
     }
 }
-//TODO: Turn this into a local variable within the `codegen` function
 var depth: u32 = 0;
 // ** Code-Generation ** //
 fn push() !void {
@@ -277,21 +291,22 @@ fn pop(reg: []const u8) !void {
 // Code generation
 pub fn gen_expr(node: *Node) !void {
     if (node.kind == NodeKind.Num) {
+        try stdout.writer().print(";; loading immediate {} at\n", .{node.val});
         try stdout.writer().print("mov X0, {}\n", .{node.val});
     } else if (node.kind == NodeKind.Var) {
-        try gen_addr(node);
-        try stdout.writer().print("ldr x0, [x0]\n", .{});
+        try gen_addr(node); //x0 has address of variable
+        try stdout.writer().print("ldr x0, [x0]\n", .{}); // now load val of variable into x0
     } else if (node.kind == NodeKind.Unary) {
         try gen_expr(node.lhs.?);
         try stdout.writer().print("neg x0, x0\n", .{});
     } else if (node.kind == NodeKind.Assign) {
-        try gen_addr(node.lhs.?);
-        try push();
-        try gen_expr(node.rhs.?);
-        try pop(span("x1"));
+        try gen_addr(node.lhs.?); //x0 has addr of variable
+        try push(); //push x0 into stack
+        try gen_expr(node.rhs.?); // x0 now has value
+        try pop(span("x1")); // x1 has addr of variable
         try stdout.writer().print("str X0, [X1]\n", .{});
     } else {
-        // idea, gen_expr, returns which register the end value of that expr is in
+        // Idea, gen_expr, returns which register the end value of that expr is in
         // we can then use this as an input into the subsequent Add, Sub, Mul, Div
         // instructions, instead of pushing and popping from stack
         try gen_expr(node.rhs.?);
@@ -346,16 +361,61 @@ fn gen_stmt(n: *Node) !void {
     }
     panic("Invalid node {any}", .{n});
 }
-pub fn codegen(n: *Node) !void {
+pub fn codegen(f: *Function) !void {
+    assign_lvar_offsets(f);
     depth = 0;
     var stdout_writer = stdout.writer();
-    try stdout_writer.print("{s}\n", .{program_header});
-    var maybe_head: ?*Node = n;
+    try stdout_writer.print("{s}\n", .{fn_prologue});
+    try stdout_writer.print("sub sp, sp, #{}\n", .{f.stack_size});
+    var maybe_head: ?*Node = f.fnbody;
     while (maybe_head) |head| {
         depth = 0;
         try gen_stmt(head);
         std.debug.assert(depth == 0);
         maybe_head = head.next;
     }
-    try stdout_writer.print("{s}\n", .{program_epilogue});
+    try stdout_writer.print("add sp, sp, #{}\n", .{f.stack_size});
+    try stdout_writer.print("{s}\n", .{fn_epilogue});
+}
+
+const Obj = struct {
+    name: []u8,
+    offset: usize = 0,
+    const Self = @This();
+    fn alloc_obj(alloc: Allocator, name: []const u8) !*Obj {
+        var obj = try alloc.create(Self);
+        obj.offset = 0;
+        obj.name = try alloc.dupe(u8, name);
+        return obj;
+    }
+};
+
+const ObjList = std.ArrayList(*Obj);
+const ParseContext = struct {
+    stream: *Stream,
+    alloc: Allocator,
+    locals: ObjList,
+};
+const Function = struct { fnbody: *Node, locals: ObjList, stack_size: usize };
+
+fn align_to(n: usize, al: u32) usize {
+    return (n + al - 1) / al * al;
+}
+
+fn assign_lvar_offsets(prog: *Function) void {
+    var offset: usize = 0;
+    for (prog.locals.items) |*local| {
+        offset += 8;
+        local.*.offset = offset;
+    }
+    prog.*.stack_size = align_to(offset, 16);
+}
+
+fn find_local_var(ident: []const u8, locals: ObjList) ?*Obj {
+    for (locals.items) |l| {
+        if (std.mem.eql(u8, l.name, ident)) {
+            return l;
+        }
+    }
+    return null;
 }

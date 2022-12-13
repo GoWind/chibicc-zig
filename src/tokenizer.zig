@@ -141,9 +141,13 @@ pub fn tokenize(stream_p: *[*:0]u8, list: *TokenList) !void {
             var number = strtol(&stream);
             try list.append(Token{ .num = .{ .val = number.? } });
             // Identifiers
-        } else if (ascii.isAlpha(stream[0])) {
-            try list.append(Token{ .ident = .{ .ptr = stream[0..1] } });
-            stream += 1;
+        } else if (isIdent1(stream[0])) {
+            var nextIdx: usize = 1;
+            while (isIdent2(stream[0 + nextIdx])) {
+                nextIdx += 1;
+            }
+            try list.append(Token{ .ident = .{ .ptr = stream[0..nextIdx] } });
+            stream += nextIdx;
             // Operators
         } else if (readPunct(span(stream)) > 0) {
             var punct_len = readPunct(span(stream));
@@ -210,4 +214,12 @@ fn readPunct(s: []const u8) usize {
 
 fn starts_with(q: []const u8, p: []const u8) bool {
     return std.mem.startsWith(u8, q, p);
+}
+
+fn isIdent1(c: u8) bool {
+    return ('a' <= c and c <= 'z') or ('A' <= c and c <= 'Z') or c == '_';
+}
+
+fn isIdent2(c: u8) bool {
+    return isIdent1(c) or '0' <= c and c <= '9';
 }
