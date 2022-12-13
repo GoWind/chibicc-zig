@@ -7,7 +7,7 @@ const stdout = std.io.getStdOut();
 const tokenizer = @import("./tokenizer.zig");
 const codegen = @import("./codegen.zig");
 const Node = codegen.Node;
-
+const POSIX_C_SOURCE = "200809L";
 const panic = std.debug.panic;
 
 pub fn main() anyerror!void {
