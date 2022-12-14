@@ -3,7 +3,8 @@ const Allocator = std.mem.Allocator;
 const span = std.mem.span;
 const panic = std.debug.panic;
 const ascii = std.ascii;
-pub const TokenKind = enum { punct, num, eof, ident };
+const keywords = [_][]const u8{"return"};
+pub const TokenKind = enum { punct, num, eof, ident, keyword };
 pub const Token = union(TokenKind) {
     const Self = @This();
     punct: struct {
@@ -14,7 +15,18 @@ pub const Token = union(TokenKind) {
     ident: struct {
         ptr: []const u8,
     },
+    keyword: struct {
+        ptr: []const u8,
+    },
 
+    pub fn isKeyword(word: []u8) bool {
+        for (keywords) |keyword| {
+            if (std.mem.eql(u8, word, keyword)) {
+                return true;
+            }
+        }
+        return false;
+    }
     pub fn equal(self: *Self, other: *const Token) bool {
         if (std.mem.eql(u8, @tagName(self.*), @tagName(other.*)) == false) {
             return false;
@@ -26,6 +38,11 @@ pub const Token = union(TokenKind) {
             },
             TokenKind.punct => {
                 return self.equal_puncts(other);
+            },
+            TokenKind.keyword => |v| {
+                var struct_other = @field(other, "keyword");
+                var keyword = @field(struct_other, "ptr");
+                return std.mem.eql(u8, v.ptr, keyword);
             },
             else => {
                 panic("We shouldn't be here", .{});
@@ -140,13 +157,21 @@ pub fn tokenize(stream_p: *[*:0]u8, list: *TokenList) !void {
             //notice that we are modifying stream here
             var number = strtol(&stream);
             try list.append(Token{ .num = .{ .val = number.? } });
-            // Identifiers
+            // Identifiers and Keywords
         } else if (isIdent1(stream[0])) {
             var nextIdx: usize = 1;
             while (isIdent2(stream[0 + nextIdx])) {
                 nextIdx += 1;
             }
-            try list.append(Token{ .ident = .{ .ptr = stream[0..nextIdx] } });
+            // In chibicc, Ident Tokens were converted to keywords *AFTER*
+            // the entire source was parsed. I don't know which method is better
+            // of if there is a clear advantage to converting idents to keywords
+            // later once all tokens are scanned
+            var t = if (Token.isKeyword(stream[0..nextIdx]))
+                Token{ .keyword = .{ .ptr = stream[0..nextIdx] } }
+            else
+                Token{ .ident = .{ .ptr = stream[0..nextIdx] } };
+            try list.append(t);
             stream += nextIdx;
             // Operators
         } else if (readPunct(span(stream)) > 0) {
