@@ -5,7 +5,7 @@ const Stream = tokenizer.Stream;
 const Allocator = std.mem.Allocator;
 const span = std.mem.span;
 const panic = std.debug.panic;
-const all_valid_chars = "()/*+-==!=<<=>>=;=";
+const all_valid_chars = "()/*+-==!=<<=>>=;={}";
 const stdout = std.io.getStdOut();
 pub const LEFT_PAREN = Token{ .punct = .{ .ptr = span(all_valid_chars[0..1]) } };
 pub const RIGHT_PAREN = Token{ .punct = .{ .ptr = span(all_valid_chars[1..2]) } };
@@ -21,19 +21,23 @@ pub const GT = Token{ .punct = .{ .ptr = span(all_valid_chars[13..14]) } };
 pub const GTE = Token{ .punct = .{ .ptr = span(all_valid_chars[14..16]) } };
 pub const SEMICOLON = Token{ .punct = .{ .ptr = span(all_valid_chars[16..17]) } };
 pub const ASSIGN = Token{ .punct = .{ .ptr = span(all_valid_chars[17..18]) } };
+pub const LBRACE = Token{ .punct = .{ .ptr = span(all_valid_chars[18..19]) } };
+pub const RBRACE = Token{ .punct = .{ .ptr = span(all_valid_chars[19..20]) } };
+
 pub const RETURN = Token{ .keyword = .{ .ptr = span("return") } };
 // ** AST Generation ** //
 
 // Code emitter
-const NodeKind = enum { Add, Sub, Mul, Div, Unary, Num, Eq, Neq, Lt, Lte, ExprStmt, Assign, Var, Ret };
+const NodeKind = enum { Add, Sub, Mul, Div, Unary, Num, Eq, Neq, Lt, Lte, ExprStmt, Assign, Var, Ret, Block };
 pub const Node = struct {
     const Self = @This();
     kind: NodeKind,
     next: ?*Node = null,
     lhs: ?*Node = null,
     rhs: ?*Node = null,
-    val: i32 = 0,
-    variable: ?*Obj = null,
+    body: ?*Node = null,
+    val: i32 = 0, // Used when Kind = Num
+    variable: ?*Obj = null, // Used when Kind = var
 
     // self is a pointer into global heap region or a fn-local heap
     fn from_binary(self: *Self, kind: NodeKind, lhs: ?*Node, rhs: ?*Node) void {
@@ -51,6 +55,9 @@ pub const Node = struct {
     }
     fn from_ident(self: *Self, variable: *Obj) void {
         self.* = .{ .kind = NodeKind.Var, .variable = variable };
+    }
+    fn from_block(self: *Self, body: ?*Node) void {
+        self.* = .{ .kind = NodeKind.Block, .body = body };
     }
 };
 
@@ -213,8 +220,34 @@ fn primary(p: *ParseContext) anyerror!*Node {
     }
 }
 
+fn compound_statement(p: *ParseContext) anyerror!*Node {
+    var first_stmt: ?*Node = null;
+    var it = first_stmt;
+    var stream = p.stream;
+    while (stream.top().equal(&RBRACE) == false) {
+        var statement = try stmt(p);
+        if (first_stmt == null) {
+            first_stmt = statement;
+            it = statement;
+        } else {
+            it.?.next = statement;
+            it = statement;
+        }
+    }
+    var compound_stmt_node = try p.alloc.create(Node);
+    compound_stmt_node.from_block(first_stmt);
+    stream.consume();
+    return compound_stmt_node;
+}
+// expr-stmt = expr? ;
 fn expr_statement(p: *ParseContext) !*Node {
     var s = p.stream;
+    if (s.top().equal(&SEMICOLON)) {
+        s.consume();
+        var empty_stmt = try p.alloc.create(Node);
+        empty_stmt.from_block(null);
+        return empty_stmt;
+    }
     var expr_node = try p.alloc.create(Node);
     var lhs = try expr(p);
     expr_node.from_expr_stmt(lhs);
@@ -222,37 +255,33 @@ fn expr_statement(p: *ParseContext) !*Node {
     return expr_node;
 }
 // stmt = "return" expr ";"
+//      | "{" compound-stmt
 //      | expr-stmt
 fn stmt(p: *ParseContext) !*Node {
     var stream = p.stream;
-    if (stream.top().equal(&RETURN)) {
+    var stream_top = stream.top();
+    if (stream_top.equal(&RETURN)) {
         stream.consume();
         var return_expr = try expr(p);
         stream.skip(&SEMICOLON);
         var return_node = try p.alloc.create(Node);
         return_node.from_unary(NodeKind.Ret, return_expr);
         return return_node;
+    } else if (stream_top.equal(&LBRACE)) {
+        stream.consume();
+        return compound_statement(p);
     } else {
         return expr_statement(p);
     }
 }
 pub fn parse(s: *Stream, alloc: Allocator) !*Function {
-    var root_node: ?*Node = null;
-    var it = root_node;
     var parse_context = ParseContext{ .stream = s, .alloc = alloc, .locals = ObjList.init(alloc) };
     //FIXME: When do we deinit locals ?
-    while (!s.is_eof()) {
-        var next = try stmt(&parse_context);
-        if (root_node == null) {
-            root_node = next;
-            it = root_node;
-        } else {
-            it.?.next = next;
-            it = next;
-        }
-    }
+    s.skip(&LBRACE);
+    var program_body = try compound_statement(&parse_context);
+
     var f = try alloc.create(Function);
-    f.fnbody = root_node.?;
+    f.fnbody = program_body;
     f.locals = parse_context.locals;
     f.stack_size = 0; //FIXME: What should this be ?
     return f;
@@ -368,6 +397,13 @@ pub fn gen_expr(node: *Node) !void {
 
 fn gen_stmt(n: *Node) !void {
     switch (n.kind) {
+        NodeKind.Block => {
+            var maybe_it = n.body;
+            while (maybe_it) |it| {
+                try gen_stmt(it);
+                maybe_it = it.next;
+            }
+        },
         NodeKind.ExprStmt => {
             try gen_expr(n.lhs.?);
             return;
@@ -385,17 +421,10 @@ fn gen_stmt(n: *Node) !void {
 }
 pub fn codegen(f: *Function) !void {
     assign_lvar_offsets(f);
-    depth = 0;
     var stdout_writer = stdout.writer();
     try stdout_writer.print("{s}\n", .{fn_prologue});
     try stdout_writer.print("sub sp, sp, #{}\n", .{f.stack_size});
-    var maybe_head: ?*Node = f.fnbody;
-    while (maybe_head) |head| {
-        depth = 0;
-        try gen_stmt(head);
-        std.debug.assert(depth == 0);
-        maybe_head = head.next;
-    }
+    try gen_stmt(f.fnbody);
     try stdout_writer.print("add sp, sp, #{}\n", .{f.stack_size});
     try stdout_writer.print("{s}\n", .{fn_epilogue});
 }
