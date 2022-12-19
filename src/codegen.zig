@@ -5,7 +5,7 @@ const Stream = tokenizer.Stream;
 const Allocator = std.mem.Allocator;
 const span = std.mem.span;
 const panic = std.debug.panic;
-const all_valid_chars = "()/*+-==!=<<=>>=;={}";
+const all_valid_chars = "()/*+-==!=<<=>>=;={}ifelse()";
 const stdout = std.io.getStdOut();
 pub const LEFT_PAREN = Token{ .punct = .{ .ptr = span(all_valid_chars[0..1]) } };
 pub const RIGHT_PAREN = Token{ .punct = .{ .ptr = span(all_valid_chars[1..2]) } };
@@ -23,19 +23,27 @@ pub const SEMICOLON = Token{ .punct = .{ .ptr = span(all_valid_chars[16..17]) } 
 pub const ASSIGN = Token{ .punct = .{ .ptr = span(all_valid_chars[17..18]) } };
 pub const LBRACE = Token{ .punct = .{ .ptr = span(all_valid_chars[18..19]) } };
 pub const RBRACE = Token{ .punct = .{ .ptr = span(all_valid_chars[19..20]) } };
+pub const IF = Token{ .keyword = .{ .ptr = span(all_valid_chars[20..22]) } };
+pub const ELSE = Token{ .keyword = .{ .ptr = span(all_valid_chars[22..26]) } };
+pub const LPAREN = Token{ .punct = .{ .ptr = span(all_valid_chars[26..27]) } };
+pub const RPAREN = Token{ .punct = .{ .ptr = span(all_valid_chars[27..28]) } };
 
 pub const RETURN = Token{ .keyword = .{ .ptr = span("return") } };
 // ** AST Generation ** //
 
 // Code emitter
-const NodeKind = enum { Add, Sub, Mul, Div, Unary, Num, Eq, Neq, Lt, Lte, ExprStmt, Assign, Var, Ret, Block };
+const NodeKind = enum { Add, Sub, Mul, Div, Unary, Num, Eq, Neq, Lt, Lte, ExprStmt, Assign, Var, Ret, Block, If };
 pub const Node = struct {
     const Self = @This();
     kind: NodeKind,
-    next: ?*Node = null,
+    next: ?*Node = null, // Compound Statement
     lhs: ?*Node = null,
     rhs: ?*Node = null,
-    body: ?*Node = null,
+    body: ?*Node = null, // For Blocks
+    // If else blocks
+    cond: ?*Node = null,
+    then: ?*Node = null,
+    els: ?*Node = null,
     val: i32 = 0, // Used when Kind = Num
     variable: ?*Obj = null, // Used when Kind = var
 
@@ -58,6 +66,10 @@ pub const Node = struct {
     }
     fn from_block(self: *Self, body: ?*Node) void {
         self.* = .{ .kind = NodeKind.Block, .body = body };
+    }
+
+    fn from_if_stmt(self: *Self, cond: ?*Node, then: ?*Node, els: ?*Node) void {
+        self.* = .{ .kind = NodeKind.If, .cond = cond, .then = then, .els = els };
     }
 };
 
@@ -255,6 +267,7 @@ fn expr_statement(p: *ParseContext) !*Node {
     return expr_node;
 }
 // stmt = "return" expr ";"
+//      | "if" "(" expr ")" stmt ("else" stmt)?
 //      | "{" compound-stmt
 //      | expr-stmt
 fn stmt(p: *ParseContext) !*Node {
@@ -267,6 +280,21 @@ fn stmt(p: *ParseContext) !*Node {
         var return_node = try p.alloc.create(Node);
         return_node.from_unary(NodeKind.Ret, return_expr);
         return return_node;
+    } else if (stream_top.equal(&IF)) {
+        stream.consume();
+        stream.skip(&LPAREN);
+        var if_node = try p.alloc.create(Node);
+        var if_condition = try expr(p);
+        stream.skip(&RPAREN);
+        var then_stmt = try stmt(p);
+        if (stream.top().equal(&ELSE)) {
+            stream.consume();
+            var else_stmt = try stmt(p);
+            if_node.from_if_stmt(if_condition, then_stmt, else_stmt);
+        } else {
+            if_node.from_if_stmt(if_condition, then_stmt, null);
+        }
+        return if_node;
     } else if (stream_top.equal(&LBRACE)) {
         stream.consume();
         return compound_statement(p);
@@ -396,7 +424,25 @@ pub fn gen_expr(node: *Node) !void {
 }
 
 fn gen_stmt(n: *Node) !void {
+    var stdout_writer = stdout.writer();
+
     switch (n.kind) {
+        NodeKind.If => {
+            try gen_expr(n.cond.?);
+            // x0 is 1. when `cond` holds
+            // if x0 is != 1, then cond => false hence
+            // we jump to else
+            var branch_id = update_branch_count();
+            try stdout_writer.print("cmp x0, #0\n", .{});
+            try stdout_writer.print("b.eq else_label_{}\n", .{branch_id});
+            try gen_stmt(n.then.?);
+            try stdout_writer.print("b end_label_{}\n", .{branch_id});
+            try stdout_writer.print("else_label_{}:\n", .{branch_id});
+            if (n.els) |else_stmt| {
+                try gen_stmt(else_stmt);
+            }
+            try stdout_writer.print("end_label_{}:\n", .{branch_id});
+        },
         NodeKind.Block => {
             var maybe_it = n.body;
             while (maybe_it) |it| {
@@ -410,7 +456,6 @@ fn gen_stmt(n: *Node) !void {
         },
         NodeKind.Ret => {
             try gen_expr(n.lhs.?);
-            var stdout_writer = stdout.writer();
             try stdout_writer.print("b return_label\n", .{});
             return;
         },
@@ -469,4 +514,11 @@ fn find_local_var(ident: []const u8, locals: ObjList) ?*Obj {
         }
     }
     return null;
+}
+
+//FIXME: How do I make this a local within the main codegen function ?
+var if_branch_val: u32 = 0;
+fn update_branch_count() u32 {
+    if_branch_val += 1;
+    return if_branch_val;
 }
