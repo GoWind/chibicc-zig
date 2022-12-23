@@ -37,6 +37,43 @@ pub const RETURN = Token{ .keyword = .{ .ptr = span("return") } };
 // For and while use the same kind
 // but in `while`, we disregard `inc`
 const NodeKind = enum { Add, Sub, Mul, Div, Unary, Num, Eq, Neq, Lt, Lte, ExprStmt, Assign, Var, Ret, Block, If, For };
+pub const Unionode = union(NodeKind) {
+    const Self = @This();
+    const binary_struct = struct { lhs: ?*Self = null, rhs: ?*Self = null };
+    const unary_struct = struct { lhs: *Self };
+    Add: binary_struct,
+    Sub: binary_struct,
+    Mul: binary_struct,
+    Div: binary_struct,
+    Unary: unary_struct,
+    Num: struct { val: i32 },
+    Eq: binary_struct,
+    Neq: binary_struct,
+    Lt: binary_struct,
+    Lte: binary_struct,
+    ExprStmt: unary_struct,
+    Assign: binary_struct,
+    Var: struct { variable: ?*Obj = null },
+    Ret: unary_struct,
+    Block: struct { body: ?*Node },
+    If: struct { cond: ?*Node, then: ?*Node, els: ?*Node },
+    For: struct { int: ?*Node, cond: ?*Node, inc: ?*Node, then: ?*Node },
+};
+// A variable in our C code
+const Obj = struct {
+    name: []u8,
+    offset: usize = 0,
+    const Self = @This();
+    fn alloc_obj(alloc: Allocator, name: []const u8) !*Obj {
+        var obj = try alloc.create(Self);
+        obj.offset = 0;
+        obj.name = try alloc.dupe(u8, name);
+        return obj;
+    }
+};
+// List of variables that we have encountered so far in our C code
+const ObjList = std.ArrayList(*Obj);
+
 pub const Node = struct {
     const Self = @This();
     kind: NodeKind,
@@ -54,34 +91,68 @@ pub const Node = struct {
     inc: ?*Node = null,
     val: i32 = 0, // Used when Kind = Num
     variable: ?*Obj = null, // Used when Kind = var
-
+    tok: ?*Token = null, // The token in the parse stream that was
+    //used as a basis to create this node
     // self is a pointer into global heap region or a fn-local heap
-    fn from_binary(self: *Self, kind: NodeKind, lhs: ?*Node, rhs: ?*Node) void {
-        self.* = .{ .kind = kind, .lhs = lhs, .rhs = rhs };
+    fn from_binary(self: *Self, kind: NodeKind, lhs: ?*Node, rhs: ?*Node, tok: ?*Token) void {
+        self.* = .{ .kind = kind, .lhs = lhs, .rhs = rhs, .tok = tok };
     }
 
-    fn from_num(self: *Self, num: i32) void {
-        self.* = .{ .kind = NodeKind.Num, .val = num };
+    fn from_num(self: *Self, num: i32, tok: ?*Token) void {
+        self.* = .{ .kind = NodeKind.Num, .val = num, .tok = tok };
     }
-    fn from_unary(self: *Self, kind: NodeKind, lhs: ?*Node) void {
-        self.* = .{ .kind = kind, .lhs = lhs };
+    fn from_unary(self: *Self, kind: NodeKind, lhs: ?*Node, tok: ?*Token) void {
+        self.* = .{ .kind = kind, .lhs = lhs, .tok = tok };
     }
-    fn from_expr_stmt(self: *Self, lhs: ?*Node) void {
-        self.* = .{ .kind = NodeKind.ExprStmt, .lhs = lhs };
+    fn from_expr_stmt(self: *Self, lhs: ?*Node, tok: ?*Token) void {
+        self.* = .{ .kind = NodeKind.ExprStmt, .lhs = lhs, .tok = tok };
     }
-    fn from_ident(self: *Self, variable: *Obj) void {
-        self.* = .{ .kind = NodeKind.Var, .variable = variable };
+    fn from_ident(self: *Self, variable: *Obj, tok: ?*Token) void {
+        self.* = .{ .kind = NodeKind.Var, .variable = variable, .tok = tok };
     }
-    fn from_block(self: *Self, body: ?*Node) void {
-        self.* = .{ .kind = NodeKind.Block, .body = body };
-    }
-
-    fn from_if_stmt(self: *Self, cond: ?*Node, then: ?*Node, els: ?*Node) void {
-        self.* = .{ .kind = NodeKind.If, .cond = cond, .then = then, .els = els };
+    fn from_block(self: *Self, body: ?*Node, tok: ?*Token) void {
+        self.* = .{ .kind = NodeKind.Block, .body = body, .tok = tok };
     }
 
-    fn from_for(self: *Self, init: ?*Node, cond: ?*Node, inc: ?*Node, then: ?*Node) void {
-        self.* = .{ .kind = NodeKind.For, .init = init, .cond = cond, .inc = inc, .then = then };
+    fn from_if_stmt(self: *Self, cond: ?*Node, then: ?*Node, els: ?*Node, tok: ?*Token) void {
+        self.* = .{ .kind = NodeKind.If, .cond = cond, .then = then, .els = els, .tok = tok };
+    }
+
+    fn from_for(self: *Self, init: ?*Node, cond: ?*Node, inc: ?*Node, then: ?*Node, tok: ?*Token) void {
+        self.* = .{ .kind = NodeKind.For, .init = init, .cond = cond, .inc = inc, .then = then, .tok = tok };
+    }
+
+    pub fn format(self: Self, comptime _: []const u8, _: std.fmt.FormatOptions, out_stream: anytype) !void {
+        switch (self.kind) {
+            NodeKind.Add, NodeKind.Sub, NodeKind.Mul, NodeKind.Div, NodeKind.Assign, NodeKind.Eq, NodeKind.Neq, NodeKind.Lt, NodeKind.Lte => {
+                try std.fmt.format(out_stream, "Node {?} starting at {?} with lhs {?} and rhs {?}\n", .{ self.kind, self.tok, self.lhs, self.rhs });
+            },
+            NodeKind.Unary => {
+                try std.fmt.format(out_stream, "Node {?} starting at {?} with lhs {?}\n", .{ self.kind, self.tok, self.lhs });
+            },
+            NodeKind.Num => {
+                try std.fmt.format(out_stream, "Number node {?} with value {?}\n", .{ self.tok, self.val });
+            },
+
+            NodeKind.ExprStmt => {
+                try std.fmt.format(out_stream, "Expression statement {?}\n", .{self.lhs});
+            },
+            NodeKind.Block => {
+                try std.fmt.format(out_stream, "Block starting at {?}\n {?}", .{ self.tok, self.body });
+            },
+            NodeKind.Var => {
+                try std.fmt.format(out_stream, "Variable Node {?} with value {?}\n", .{ self.tok, self.variable });
+            },
+            NodeKind.Ret => {
+                try std.fmt.format(out_stream, "Return starting at {?}\n with expr {?}\n", .{ self.tok, self.variable });
+            },
+            NodeKind.If => {
+                try std.fmt.format(out_stream, "If Node {?} with \ncond {?}\n then {?} else{?}\n", .{ self.tok, self.cond, self.then, self.els });
+            },
+            NodeKind.For => {
+                try std.fmt.format(out_stream, "ForNode starting at {?} with init {?}\ncond {?}\n then {?} else{?}\n", .{ self.tok, self.init, self.cond, self.then, self.els });
+            },
+        }
     }
 };
 
@@ -95,7 +166,7 @@ fn unary(p: *ParseContext) !*Node {
         stream.consume();
         var lhs = try unary(p);
         var unary_node = try p.alloc.create(Node);
-        unary_node.from_unary(NodeKind.Unary, lhs);
+        unary_node.from_unary(NodeKind.Unary, lhs, stream_top);
         return unary_node;
     }
     return primary(p);
@@ -111,7 +182,7 @@ fn mul(p: *ParseContext) !*Node {
             s.consume();
             var rhs = try unary(p);
             var expr_node = try p.alloc.create(Node);
-            expr_node.from_binary(op, lhs, rhs);
+            expr_node.from_binary(op, lhs, rhs, stream_top);
             lhs = expr_node;
         } else {
             loop = false;
@@ -123,11 +194,12 @@ fn mul(p: *ParseContext) !*Node {
 fn assign(p: *ParseContext) !*Node {
     var lhs = try equality(p);
     var stream = p.stream;
-    if (stream.top().equal(&ASSIGN)) {
+    var top = stream.top();
+    if (top.equal(&ASSIGN)) {
         stream.consume();
         var rhs = try assign(p);
         var assign_node = try p.alloc.create(Node);
-        assign_node.from_binary(NodeKind.Assign, lhs, rhs);
+        assign_node.from_binary(NodeKind.Assign, lhs, rhs, top);
         return assign_node;
     }
     return lhs;
@@ -146,7 +218,7 @@ fn add(p: *ParseContext) !*Node {
             s.consume();
             var rhs = try mul(p);
             var expr_node = try p.alloc.create(Node);
-            expr_node.from_binary(op, lhs, rhs);
+            expr_node.from_binary(op, lhs, rhs, stream_top);
             lhs = expr_node;
         } else {
             loop = false;
@@ -162,10 +234,11 @@ fn equality(p: *ParseContext) !*Node {
         var stream_top = stream.top();
         if (stream_top.equal(&EQEQ) or stream_top.equal(&NOTEQ)) {
             var op = if (stream_top.equal(&EQEQ)) NodeKind.Eq else NodeKind.Neq;
+            var op_tok = stream_top;
             stream.consume();
             var rhs = try relational(p);
             var rel_node = try p.alloc.create(Node);
-            rel_node.from_binary(op, lhs, rhs);
+            rel_node.from_binary(op, lhs, rhs, op_tok);
             lhs = rel_node;
         } else {
             loop = false;
@@ -183,13 +256,13 @@ fn relational(p: *ParseContext) !*Node {
             var rel_node = try p.alloc.create(Node);
             stream.consume();
             var rhs = try add(p);
-            rel_node.from_binary(NodeKind.Lt, lhs, rhs);
+            rel_node.from_binary(NodeKind.Lt, lhs, rhs, stream_top);
             lhs = rel_node;
         } else if (stream_top.equal(&LTE)) {
             var rel_node = try p.alloc.create(Node);
             stream.consume();
             var rhs = try add(p);
-            rel_node.from_binary(NodeKind.Lte, lhs, rhs);
+            rel_node.from_binary(NodeKind.Lte, lhs, rhs, stream_top);
             lhs = rel_node;
             // Optimization, we need not have a NodeKind.Gte
             // we can just switch lhs and rhs with the same Lt, Lte ops
@@ -197,13 +270,13 @@ fn relational(p: *ParseContext) !*Node {
             var rel_node = try p.alloc.create(Node);
             stream.consume();
             var rhs = try add(p);
-            rel_node.from_binary(NodeKind.Lt, rhs, lhs);
+            rel_node.from_binary(NodeKind.Lt, rhs, lhs, stream_top);
             lhs = rel_node;
         } else if (stream_top.equal(&GTE)) {
             var rel_node = try p.alloc.create(Node);
             stream.consume();
             var rhs = try add(p);
-            rel_node.from_binary(NodeKind.Lte, rhs, lhs);
+            rel_node.from_binary(NodeKind.Lte, rhs, lhs, stream_top);
             lhs = rel_node;
         } else {
             loop = false;
@@ -227,7 +300,7 @@ fn primary(p: *ParseContext) anyerror!*Node {
         var variable = if (find_local_var(name, p.locals)) |local_var| local_var else try Obj.alloc_obj(p.alloc, name);
         try p.locals.append(variable);
         var variable_node = try p.alloc.create(Node);
-        variable_node.from_ident(variable);
+        variable_node.from_ident(variable, top_token);
         s.consume();
         return variable_node;
     }
@@ -236,11 +309,11 @@ fn primary(p: *ParseContext) anyerror!*Node {
         var struct_top = @field(top_token, "num");
         var val = @field(struct_top, "val");
         var num_node = try p.alloc.create(Node);
-        num_node.from_num(val);
+        num_node.from_num(val, top_token);
         s.consume();
         return num_node;
     } else {
-        panic("unexpected token {?} to parse as primary", .{top_token});
+        panic("unexpected token {?} to parse as primary\n", .{top_token.*});
     }
 }
 // stmt* }
@@ -248,6 +321,7 @@ fn compound_statement(p: *ParseContext) anyerror!*Node {
     var first_stmt: ?*Node = null;
     var it = first_stmt;
     var stream = p.stream;
+    var s_top = stream.top();
     while (stream.top().equal(&RBRACE) == false) {
         var statement = try stmt(p);
         if (first_stmt == null) {
@@ -259,22 +333,23 @@ fn compound_statement(p: *ParseContext) anyerror!*Node {
         }
     }
     var compound_stmt_node = try p.alloc.create(Node);
-    compound_stmt_node.from_block(first_stmt);
+    compound_stmt_node.from_block(first_stmt, s_top);
     stream.consume();
     return compound_stmt_node;
 }
 // expr-stmt = expr? ;
 fn expr_statement(p: *ParseContext) !*Node {
     var s = p.stream;
-    if (s.top().equal(&SEMICOLON)) {
+    var top = s.top();
+    if (top.equal(&SEMICOLON)) {
         s.consume();
         var empty_stmt = try p.alloc.create(Node);
-        empty_stmt.from_block(null);
+        empty_stmt.from_block(null, top);
         return empty_stmt;
     }
     var expr_node = try p.alloc.create(Node);
     var lhs = try expr(p);
-    expr_node.from_expr_stmt(lhs);
+    expr_node.from_expr_stmt(lhs, top);
     s.skip(&SEMICOLON);
     return expr_node;
 }
@@ -292,7 +367,7 @@ fn stmt(p: *ParseContext) !*Node {
         var return_expr = try expr(p);
         stream.skip(&SEMICOLON);
         var return_node = try p.alloc.create(Node);
-        return_node.from_unary(NodeKind.Ret, return_expr);
+        return_node.from_unary(NodeKind.Ret, return_expr, stream_top);
         return return_node;
     } else if (stream_top.equal(&IF)) {
         stream.consume();
@@ -304,9 +379,9 @@ fn stmt(p: *ParseContext) !*Node {
         if (stream.top().equal(&ELSE)) {
             stream.consume();
             var else_stmt = try stmt(p);
-            if_node.from_if_stmt(if_condition, then_stmt, else_stmt);
+            if_node.from_if_stmt(if_condition, then_stmt, else_stmt, stream_top);
         } else {
-            if_node.from_if_stmt(if_condition, then_stmt, null);
+            if_node.from_if_stmt(if_condition, then_stmt, null, stream_top);
         }
         return if_node;
     } else if (stream_top.equal(&FOR)) {
@@ -325,7 +400,7 @@ fn stmt(p: *ParseContext) !*Node {
         stream.skip(&RPAREN);
         var for_then = try stmt(p);
         var for_node = try p.alloc.create(Node);
-        for_node.from_for(for_init, for_cond, for_inc, for_then);
+        for_node.from_for(for_init, for_cond, for_inc, for_then, stream_top);
         return for_node;
     } else if (stream_top.equal(&WHILE)) {
         stream.consume();
@@ -334,7 +409,7 @@ fn stmt(p: *ParseContext) !*Node {
         stream.skip(&RPAREN);
         var while_then = try stmt(p);
         var while_node = try p.alloc.create(Node);
-        while_node.from_for(null, while_cond, null, while_then);
+        while_node.from_for(null, while_cond, null, while_then, stream_top);
         return while_node;
     } else if (stream_top.equal(&LBRACE)) {
         stream.consume();
@@ -533,19 +608,6 @@ pub fn codegen(f: *Function) !void {
     try stdout_writer.print("{s}\n", .{fn_epilogue});
 }
 
-const Obj = struct {
-    name: []u8,
-    offset: usize = 0,
-    const Self = @This();
-    fn alloc_obj(alloc: Allocator, name: []const u8) !*Obj {
-        var obj = try alloc.create(Self);
-        obj.offset = 0;
-        obj.name = try alloc.dupe(u8, name);
-        return obj;
-    }
-};
-
-const ObjList = std.ArrayList(*Obj);
 const ParseContext = struct {
     stream: *Stream,
     alloc: Allocator,
