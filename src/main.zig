@@ -10,6 +10,14 @@ const Node = codegen.Node;
 const POSIX_C_SOURCE = "200809L";
 const panic = std.debug.panic;
 
+fn debug_token_stream(s: *tokenizer.Stream) void {
+    while (s.is_eof() == false) {
+        var top = s.top();
+        std.debug.print("{?}\n", .{top});
+        s.consume();
+    }
+    s.*.idx = 0;
+}
 pub fn main() anyerror!void {
     var argv = std.os.argv;
     if (argv.len != 2) {
