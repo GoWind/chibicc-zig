@@ -40,6 +40,15 @@ pub const RETURN = Token{ .keyword = .{ .ptr = span("return") } };
 // but in `while`, we disregard `inc`
 const NodeKind = enum { Add, Sub, Mul, Div, Unary, Num, Eq, Neq, Lt, Lte, ExprStmt, Assign, Var, Ret, Block, If, For, Addr, Deref };
 
+const TypeKind = enum { Int, Ptr };
+// Type information about variables
+const Type = struct {
+    kind: TypeKind,
+    base: ?*const Type,
+};
+
+const IntBaseType = Type{ .kind = TypeKind.Int, .base = null };
+
 // A variable in our C code
 const Obj = struct {
     name: []u8,
@@ -58,6 +67,8 @@ const ObjList = std.ArrayList(*Obj);
 pub const Node = struct {
     const Self = @This();
     kind: NodeKind,
+    n_type: ?*const Type = null, // Type information about this node, if it represents a
+    // var or an immediate value etc.
     next: ?*Node = null, // Compound Statement
     lhs: ?*Node = null,
     rhs: ?*Node = null,
@@ -136,6 +147,77 @@ pub const Node = struct {
         }
     }
 };
+
+fn new_add(p: *ParseContext, lhs: ?*Node, rhs: ?*Node, tok: *Token) !*Node {
+    if (lhs) |l| add_type(p.alloc, l);
+    if (rhs) |r| add_type(p.alloc, r);
+
+    if (lhs.?.n_type.?.kind == TypeKind.Int and rhs.?.n_type.?.kind == TypeKind.Int) {
+        var add_node = try p.alloc.create(Node);
+        add_node.from_binary(NodeKind.Add, lhs, rhs, tok);
+        return add_node;
+    }
+
+    // why ? because cannot add ptr + ptr
+    // all pointer vars will have n_type = TypeKind.Ptr and the base type of
+    // TypeKind.Ptr will be Int (for now just Int, other types will be added later)
+    if (lhs.?.n_type.?.base != null and rhs.?.n_type.?.base != null) {
+        panic("Invalid operands for arithmetic {?}\n", .{tok});
+    }
+    // change num + ptr to ptr + num
+    var l: ?*Node = lhs;
+    var r: ?*Node = rhs;
+    if (lhs.?.n_type.?.base == null and rhs.?.n_type.?.base != null) {
+        l = rhs;
+        r = lhs;
+    }
+    var new_rhs = try p.alloc.create(Node);
+    var stride_node = try p.alloc.create(Node);
+    stride_node.from_num(8, tok); // For now we recognize only 8 byte integers
+    // Later we will utilize the size of the type from *Node `l`
+    new_rhs.from_binary(NodeKind.Mul, r, stride_node, tok);
+    var new_binary = try p.alloc.create(Node);
+    new_binary.from_binary(NodeKind.Add, l, new_rhs, tok);
+    return new_binary;
+}
+
+// Like `+`, `-` is overloaded for the pointer type.
+fn new_sub(p: *ParseContext, lhs: ?*Node, rhs: ?*Node, tok: *Token) !*Node {
+    if (lhs) |l| add_type(p.alloc, l);
+    if (rhs) |r| add_type(p.alloc, r);
+
+    if (lhs.?.n_type.?.kind == TypeKind.Int and rhs.?.n_type.?.kind == TypeKind.Int) {
+        var sub_node = try p.alloc.create(Node);
+        sub_node.from_binary(NodeKind.Sub, lhs, rhs, tok);
+        return sub_node;
+    }
+
+    var stride_node = try p.alloc.create(Node);
+    stride_node.from_num(8, tok); // For now we recognize only 8 byte integers
+    var new_binary = try p.alloc.create(Node);
+
+    // ptr - num
+    if (lhs.?.n_type.?.base != null and rhs.?.n_type.?.kind == TypeKind.Int) {
+        var new_rhs = try p.alloc.create(Node);
+        new_rhs.from_binary(NodeKind.Mul, rhs, stride_node, tok);
+        // we are creating a *new* rhs, so we need to add type info
+        // to the new rhs node
+        add_type(p.alloc, new_rhs);
+        new_binary.from_binary(NodeKind.Sub, lhs, new_rhs, tok);
+        new_binary.n_type = lhs.?.n_type;
+        return new_binary;
+    }
+    // ptr - ptr, which returns how many elements are between the two.
+    if (lhs.?.n_type.?.base != null and rhs.?.n_type.?.base != null) {
+        var sub_res = try p.alloc.create(Node);
+        sub_res.from_binary(NodeKind.Sub, lhs, rhs, tok);
+        sub_res.n_type = &IntBaseType;
+        new_binary.from_binary(NodeKind.Div, sub_res, stride_node, tok);
+        return new_binary;
+    }
+    panic("Invalid token for Subtration operation {?}\n", .{tok});
+}
+
 // unary = ( '+' | '-' | '*' | '-' | '&' | '*' ) unary
 //         | primary
 fn unary(p: *ParseContext) !*Node {
@@ -148,6 +230,7 @@ fn unary(p: *ParseContext) !*Node {
         stream.consume();
         var lhs = try unary(p);
         var unary_node = try p.alloc.create(Node);
+        //TODO: Add `Neg` kind here
         unary_node.from_unary(NodeKind.Unary, lhs, stream_top);
         return unary_node;
     } else if (stream_top.equal(&ADDR)) {
@@ -211,8 +294,7 @@ fn add(p: *ParseContext) !*Node {
             var op = if (stream_top.equal(&PLUS)) NodeKind.Add else NodeKind.Sub;
             s.consume();
             var rhs = try mul(p);
-            var expr_node = try p.alloc.create(Node);
-            expr_node.from_binary(op, lhs, rhs, stream_top);
+            var expr_node = if (op == NodeKind.Add) try new_add(p, lhs, rhs, stream_top) else try new_sub(p, lhs, rhs, stream_top);
             lhs = expr_node;
         } else {
             loop = false;
@@ -325,6 +407,7 @@ fn compound_statement(p: *ParseContext) anyerror!*Node {
     var s_top = stream.top();
     while (stream.top().equal(&RBRACE) == false) {
         var statement = try stmt(p);
+        add_type(p.alloc, statement);
         if (first_stmt == null) {
             first_stmt = statement;
             it = statement;
@@ -495,6 +578,7 @@ pub fn gen_expr(node: *Node) anyerror!void {
     } else if (node.kind == NodeKind.Deref) {
         try gen_expr(node.lhs.?); // x0 now should have an address (from a variable ideally)
         try stdout.writer().print("ldr x0, [x0]\n", .{});
+        //TODO: This should be neg, not Unary
     } else if (node.kind == NodeKind.Unary) {
         try gen_expr(node.lhs.?);
         try stdout.writer().print("neg x0, x0\n", .{});
@@ -641,7 +725,6 @@ fn assign_lvar_offsets(prog: *Function) void {
         local.*.offset = offset;
     }
     prog.*.stack_size = align_to(offset, 16);
-    // std.debug.print(";;stack_size is {}\n", .{align_to(offset, 16)});
 }
 
 fn find_local_var(ident: []const u8, locals: ObjList) ?*Obj {
@@ -658,4 +741,73 @@ var if_branch_val: u32 = 0;
 fn update_branch_count() u32 {
     if_branch_val += 1;
     return if_branch_val;
+}
+
+fn add_type(ally: Allocator, n: *Node) void {
+    if (n.n_type != null) { // already has type info , so just return
+        return;
+    }
+    if (n.lhs) |lhs| {
+        add_type(ally, lhs);
+    }
+
+    if (n.rhs) |rhs| {
+        add_type(ally, rhs);
+    }
+
+    if (n.cond) |cond| {
+        add_type(ally, cond);
+    }
+
+    if (n.then) |then| {
+        add_type(ally, then);
+    }
+
+    if (n.els) |els| {
+        add_type(ally, els);
+    }
+
+    if (n.init) |init| {
+        add_type(ally, init);
+    }
+
+    if (n.inc) |inc| {
+        add_type(ally, inc);
+    }
+
+    if (n.body) |body| {
+        var b: ?*Node = body;
+        while (b != null) : (b = b.?.next) {
+            add_type(ally, b.?);
+        }
+    }
+
+    switch (n.kind) {
+        NodeKind.Add, NodeKind.Unary, NodeKind.Sub, NodeKind.Mul, NodeKind.Div, NodeKind.Assign => {
+            n.n_type = n.lhs.?.n_type;
+        },
+        NodeKind.Eq, NodeKind.Neq, NodeKind.Lt, NodeKind.Lte, NodeKind.Var, NodeKind.Num => {
+            n.n_type = &IntBaseType;
+        },
+        NodeKind.Addr => {
+            n.n_type = pointer_to(ally, n.lhs.?.n_type.?) catch panic("failed to create Pointer type to {?}\n", .{n.lhs.?.n_type.?});
+        },
+        NodeKind.Deref => {
+            if (n.lhs.?.n_type.?.kind == TypeKind.Ptr) {
+                n.n_type = n.lhs.?.n_type.?.base;
+            } else {
+                n.n_type = &IntBaseType;
+            }
+        },
+        else => {
+            // We just ignore all the other types of nodes
+        },
+    }
+}
+// TODO: This can be memoized
+fn pointer_to(alloc: Allocator, base: *const Type) !*Type {
+    var derived = try alloc.create(Type);
+    derived.kind = TypeKind.Ptr;
+    derived.base = base;
+    return derived;
 }
