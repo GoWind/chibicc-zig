@@ -3,7 +3,7 @@ const Allocator = std.mem.Allocator;
 const span = std.mem.span;
 const panic = std.debug.panic;
 const ascii = std.ascii;
-const keywords = [_][]const u8{ "return", "if", "else", "for", "while" };
+const keywords = [_][]const u8{ "return", "if", "else", "for", "while", "int" };
 pub const TokenKind = enum { punct, num, eof, ident, keyword };
 pub const Token = union(TokenKind) {
     const Self = @This();
@@ -111,7 +111,7 @@ pub const Stream = struct {
         return &self.ts.items[self.idx];
     }
 
-    pub fn consume(self: *Self) void {
+    pub fn advance(self: *Self) void {
         self.idx += 1;
     }
 
@@ -140,10 +140,22 @@ pub const Stream = struct {
         }
         var top_token = self.top();
         if (top_token.equal(t) == true) {
-            self.consume();
+            self.advance();
         } else {
             panic(" stream.skip Expected token {?} got {?}\n", .{ t, top_token });
         }
+    }
+
+    pub fn consume(self: *Self, t: *const Token) bool {
+        if (self.is_eof()) {
+            panic("found EOF, expected {?}\n", .{t});
+        }
+        var top_token = self.top();
+        if (top_token.equal(t)) {
+            self.advance();
+            return true;
+        }
+        return false;
     }
 };
 // Takes a program string and a TokenList as input and
