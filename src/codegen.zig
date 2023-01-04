@@ -233,30 +233,28 @@ fn primary(p: *ParseContext) anyerror!*Node {
         s.skip(&RIGHT_PAREN);
         return expression;
     }
-    if (std.mem.eql(u8, @tagName(top_token.*), "ident")) {
-        var struct_top = @field(top_token, "ident");
-        var name = @field(struct_top, "ptr");
-        var variable: *Obj = undefined;
-        if (find_local_var(name, p.locals)) |local_var| {
-            variable = local_var;
-        } else {
-            panic("Undefined variable {s}\n", .{name});
-        }
-        var variable_node = try p.alloc.create(Node);
-        variable_node.from_ident(variable, top_token);
-        s.advance();
-        return variable_node;
-    }
-
-    if (std.mem.eql(u8, @tagName(top_token.*), "num")) {
-        var struct_top = @field(top_token, "num");
-        var val = @field(struct_top, "val");
-        var num_node = try p.alloc.create(Node);
-        num_node.from_num(val, top_token);
-        s.advance();
-        return num_node;
-    } else {
-        panic("unexpected token {?} to parse as primary\n", .{top_token.*});
+    switch (top_token.*) {
+        TokenKind.ident => |v| {
+            var variable: *Obj = undefined;
+            if (find_local_var(v.ptr, p.locals)) |local_var| {
+                variable = local_var;
+            } else {
+                panic("Undefined variable {s}\n", .{v.ptr});
+            }
+            var variable_node = try p.alloc.create(Node);
+            variable_node.from_ident(variable, top_token);
+            s.advance();
+            return variable_node;
+        },
+        TokenKind.num => |v| {
+            var num_node = try p.alloc.create(Node);
+            num_node.from_num(v.val, top_token);
+            s.advance();
+            return num_node;
+        },
+        else => {
+            panic("unexpected token {?} to parse as primary\n", .{top_token.*});
+        },
     }
 }
 
@@ -862,7 +860,8 @@ fn declarator(p: *ParseContext, typ: *Type) !*Type {
 // int z,c;
 // and also just `int` ?
 fn declaration(p: *ParseContext) !*Node {
-    var base_type = declspec(p);
+    var base_type = declspec(p); // This is the `int` part
+    // Lines marked with ** are the only non-housekeeping part of the parser
     var head_node: ?*Node = null;
     var cur_node: ?*Node = head_node;
     var i: usize = 0;
@@ -883,11 +882,11 @@ fn declaration(p: *ParseContext) !*Node {
         if (s.top().equal(&ASSIGN) == false) { // check if token is "="
             continue;
         }
-        s.advance();
-        var rhs = try assign(p);
+        s.advance(); // ** consume the `=` token
+        var rhs = try assign(p); // ** value of the ident
         var declaration_node = try p.alloc.create(Node);
         declaration_node.from_binary(NodeKind.Assign, lhs, rhs, top);
-        // Why is this converted into a unary node ?
+        // Why is this converted into a ExprStmt node ?
         var unary_node = try p.alloc.create(Node);
         unary_node.from_unary(NodeKind.ExprStmt, declaration_node, top);
         if (cur_node == null) {
