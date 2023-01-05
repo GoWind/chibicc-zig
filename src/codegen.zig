@@ -88,32 +88,48 @@ pub const Node = struct {
     tok: ?*const Token = null, // The token in the parse stream that was
     //used as a basis to create this node
     // self is a pointer into global heap region or a fn-local heap
-    fn from_binary(self: *Self, kind: NodeKind, lhs: ?*Node, rhs: ?*Node, tok: ?*Token) void {
+    pub fn from_binary(alloc: Allocator, kind: NodeKind, lhs: ?*Node, rhs: ?*Node, tok: ?*Token) !*Self {
+        var self = try alloc.create(Self);
         self.* = .{ .kind = kind, .lhs = lhs, .rhs = rhs, .tok = tok };
+        return self;
     }
 
-    fn from_num(self: *Self, num: i32, tok: ?*Token) void {
+    pub fn from_num(alloc: Allocator, num: i32, tok: ?*Token) !*Self {
+        var self = try alloc.create(Self);
         self.* = .{ .kind = NodeKind.Num, .val = num, .tok = tok };
+        return self;
     }
-    fn from_unary(self: *Self, kind: NodeKind, lhs: ?*Node, tok: ?*Token) void {
+    pub fn from_unary(alloc: Allocator, kind: NodeKind, lhs: ?*Node, tok: ?*Token) !*Self {
+        var self = try alloc.create(Self);
         self.* = .{ .kind = kind, .lhs = lhs, .tok = tok };
+        return self;
     }
-    fn from_expr_stmt(self: *Self, lhs: ?*Node, tok: ?*Token) void {
+    pub fn from_expr_stmt(alloc: Allocator, lhs: ?*Node, tok: ?*Token) !*Self {
+        var self = try alloc.create(Self);
         self.* = .{ .kind = NodeKind.ExprStmt, .lhs = lhs, .tok = tok };
+        return self;
     }
-    fn from_ident(self: *Self, variable: *Obj, tok: ?*const Token) void {
+    pub fn from_ident(alloc: Allocator, variable: *Obj, tok: ?*const Token) !*Self {
+        var self = try alloc.create(Self);
         self.* = .{ .kind = NodeKind.Var, .variable = variable, .tok = tok };
+        return self;
     }
-    fn from_block(self: *Self, body: ?*Node, tok: ?*Token) void {
+    pub fn from_block(alloc: Allocator, body: ?*Node, tok: ?*Token) !*Self {
+        var self = try alloc.create(Self);
         self.* = .{ .kind = NodeKind.Block, .body = body, .tok = tok };
+        return self;
     }
 
-    fn from_if_stmt(self: *Self, cond: ?*Node, then: ?*Node, els: ?*Node, tok: ?*Token) void {
+    pub fn from_if_stmt(alloc: Allocator, cond: ?*Node, then: ?*Node, els: ?*Node, tok: ?*Token) !*Self {
+        var self = try alloc.create(Self);
         self.* = .{ .kind = NodeKind.If, .cond = cond, .then = then, .els = els, .tok = tok };
+        return self;
     }
 
-    fn from_for(self: *Self, init: ?*Node, cond: ?*Node, inc: ?*Node, then: ?*Node, tok: ?*Token) void {
+    pub fn from_for(alloc: Allocator, init: ?*Node, cond: ?*Node, inc: ?*Node, then: ?*Node, tok: ?*Token) !*Self {
+        var self = try alloc.create(Self);
         self.* = .{ .kind = NodeKind.For, .init = init, .cond = cond, .inc = inc, .then = then, .tok = tok };
+        return self;
     }
 
     pub fn format(self: Self, comptime _: []const u8, _: std.fmt.FormatOptions, out_stream: anytype) !void {
@@ -155,8 +171,7 @@ fn new_add(p: *ParseContext, lhs: ?*Node, rhs: ?*Node, tok: *Token) !*Node {
     if (rhs) |r| add_type(p.alloc, r);
 
     if (lhs.?.n_type.?.kind == TypeKind.Int and rhs.?.n_type.?.kind == TypeKind.Int) {
-        var add_node = try p.alloc.create(Node);
-        add_node.from_binary(NodeKind.Add, lhs, rhs, tok);
+        var add_node = try Node.from_binary(p.alloc, NodeKind.Add, lhs, rhs, tok);
         return add_node;
     }
 
@@ -173,13 +188,10 @@ fn new_add(p: *ParseContext, lhs: ?*Node, rhs: ?*Node, tok: *Token) !*Node {
         l = rhs;
         r = lhs;
     }
-    var new_rhs = try p.alloc.create(Node);
-    var stride_node = try p.alloc.create(Node);
-    stride_node.from_num(8, tok); // For now we recognize only 8 byte integers
+    var stride_node = try Node.from_num(p.alloc, 8, tok); // For now we recognize only 8 byte integers
     // Later we will utilize the size of the type from *Node `l`
-    new_rhs.from_binary(NodeKind.Mul, r, stride_node, tok);
-    var new_binary = try p.alloc.create(Node);
-    new_binary.from_binary(NodeKind.Add, l, new_rhs, tok);
+    var new_rhs = try Node.from_binary(p.alloc, NodeKind.Mul, r, stride_node, tok);
+    var new_binary = try Node.from_binary(p.alloc, NodeKind.Add, l, new_rhs, tok);
     return new_binary;
 }
 
@@ -189,32 +201,27 @@ fn new_sub(p: *ParseContext, lhs: ?*Node, rhs: ?*Node, tok: *Token) !*Node {
     if (rhs) |r| add_type(p.alloc, r);
 
     if (lhs.?.n_type.?.kind == TypeKind.Int and rhs.?.n_type.?.kind == TypeKind.Int) {
-        var sub_node = try p.alloc.create(Node);
-        sub_node.from_binary(NodeKind.Sub, lhs, rhs, tok);
+        var sub_node = try Node.from_binary(p.alloc, NodeKind.Sub, lhs, rhs, tok);
         return sub_node;
     }
 
-    var stride_node = try p.alloc.create(Node);
-    stride_node.from_num(8, tok); // For now we recognize only 8 byte integers
-    var new_binary = try p.alloc.create(Node);
+    var stride_node = try Node.from_num(p.alloc, 8, tok); // For now we recognize only 8 byte integers
 
     // ptr - num
     if (lhs.?.n_type.?.base != null and rhs.?.n_type.?.kind == TypeKind.Int) {
-        var new_rhs = try p.alloc.create(Node);
-        new_rhs.from_binary(NodeKind.Mul, rhs, stride_node, tok);
+        var new_rhs = try Node.from_binary(p.alloc, NodeKind.Mul, rhs, stride_node, tok);
         // we are creating a *new* rhs, so we need to add type info
         // to the new rhs node
         add_type(p.alloc, new_rhs);
-        new_binary.from_binary(NodeKind.Sub, lhs, new_rhs, tok);
+        var new_binary = try Node.from_binary(p.alloc, NodeKind.Sub, lhs, new_rhs, tok);
         new_binary.n_type = lhs.?.n_type;
         return new_binary;
     }
     // ptr - ptr, which returns how many elements are between the two.
     if (lhs.?.n_type.?.base != null and rhs.?.n_type.?.base != null) {
-        var sub_res = try p.alloc.create(Node);
-        sub_res.from_binary(NodeKind.Sub, lhs, rhs, tok);
+        var sub_res = try Node.from_binary(p.alloc, NodeKind.Sub, lhs, rhs, tok);
         sub_res.n_type = &IntBaseType;
-        new_binary.from_binary(NodeKind.Div, sub_res, stride_node, tok);
+        var new_binary = Node.from_binary(p.alloc, NodeKind.Div, sub_res, stride_node, tok);
         return new_binary;
     }
     panic("Invalid token for Subtration operation {?}\n", .{tok});
@@ -241,14 +248,12 @@ fn primary(p: *ParseContext) anyerror!*Node {
             } else {
                 panic("Undefined variable {s}\n", .{v.ptr});
             }
-            var variable_node = try p.alloc.create(Node);
-            variable_node.from_ident(variable, top_token);
+            var variable_node = try Node.from_ident(p.alloc, variable, top_token);
             s.advance();
             return variable_node;
         },
         TokenKind.num => |v| {
-            var num_node = try p.alloc.create(Node);
-            num_node.from_num(v.val, top_token);
+            var num_node = try Node.from_num(p.alloc, v.val, top_token);
             s.advance();
             return num_node;
         },
@@ -269,21 +274,17 @@ fn unary(p: *ParseContext) !*Node {
     } else if (stream_top.equal(&MINUS)) {
         stream.advance();
         var lhs = try unary(p);
-        var unary_node = try p.alloc.create(Node);
-        //TODO: Add `Neg` kind here
-        unary_node.from_unary(NodeKind.Unary, lhs, stream_top);
+        var unary_node = try Node.from_unary(p.alloc, NodeKind.Unary, lhs, stream_top);
         return unary_node;
     } else if (stream_top.equal(&ADDR)) {
         stream.advance();
         var lhs = try unary(p);
-        var unary_node = try p.alloc.create(Node);
-        unary_node.from_unary(NodeKind.Addr, lhs, stream_top);
+        var unary_node = try Node.from_unary(p.alloc, NodeKind.Addr, lhs, stream_top);
         return unary_node;
     } else if (stream_top.equal(&DEREF)) {
         stream.advance();
         var lhs = try unary(p);
-        var unary_node = try p.alloc.create(Node);
-        unary_node.from_unary(NodeKind.Deref, lhs, stream_top);
+        var unary_node = try Node.from_unary(p.alloc, NodeKind.Deref, lhs, stream_top);
         return unary_node;
     }
     return primary(p);
@@ -299,8 +300,7 @@ fn mul(p: *ParseContext) !*Node {
             var op = if (stream_top.equal(&MUL)) NodeKind.Mul else NodeKind.Div;
             s.advance();
             var rhs = try unary(p);
-            var expr_node = try p.alloc.create(Node);
-            expr_node.from_binary(op, lhs, rhs, stream_top);
+            var expr_node = try Node.from_binary(p.alloc, op, lhs, rhs, stream_top);
             lhs = expr_node;
         } else {
             loop = false;
@@ -335,30 +335,26 @@ fn relational(p: *ParseContext) !*Node {
     while (loop) {
         var stream_top = stream.top();
         if (stream_top.equal(&LT)) {
-            var rel_node = try p.alloc.create(Node);
             stream.advance();
             var rhs = try add(p);
-            rel_node.from_binary(NodeKind.Lt, lhs, rhs, stream_top);
+            var rel_node = try Node.from_binary(p.alloc, NodeKind.Lt, lhs, rhs, stream_top);
             lhs = rel_node;
         } else if (stream_top.equal(&LTE)) {
-            var rel_node = try p.alloc.create(Node);
             stream.advance();
             var rhs = try add(p);
-            rel_node.from_binary(NodeKind.Lte, lhs, rhs, stream_top);
+            var rel_node = try Node.from_binary(p.alloc, NodeKind.Lte, lhs, rhs, stream_top);
             lhs = rel_node;
             // Optimization, we need not have a NodeKind.Gte
             // we can just switch lhs and rhs with the same Lt, Lte ops
         } else if (stream_top.equal(&GT)) {
-            var rel_node = try p.alloc.create(Node);
             stream.advance();
             var rhs = try add(p);
-            rel_node.from_binary(NodeKind.Lt, rhs, lhs, stream_top);
+            var rel_node = try Node.from_binary(p.alloc, NodeKind.Lt, rhs, lhs, stream_top);
             lhs = rel_node;
         } else if (stream_top.equal(&GTE)) {
-            var rel_node = try p.alloc.create(Node);
             stream.advance();
             var rhs = try add(p);
-            rel_node.from_binary(NodeKind.Lte, rhs, lhs, stream_top);
+            var rel_node = try Node.from_binary(p.alloc, NodeKind.Lte, rhs, lhs, stream_top);
             lhs = rel_node;
         } else {
             loop = false;
@@ -378,8 +374,7 @@ fn equality(p: *ParseContext) !*Node {
             var op_tok = stream_top;
             stream.advance();
             var rhs = try relational(p);
-            var rel_node = try p.alloc.create(Node);
-            rel_node.from_binary(op, lhs, rhs, op_tok);
+            var rel_node = try Node.from_binary(p.alloc, op, lhs, rhs, op_tok);
             lhs = rel_node;
         } else {
             loop = false;
@@ -395,8 +390,7 @@ fn assign(p: *ParseContext) !*Node {
     if (top.equal(&ASSIGN)) {
         stream.advance();
         var rhs = try assign(p);
-        var assign_node = try p.alloc.create(Node);
-        assign_node.from_binary(NodeKind.Assign, lhs, rhs, top);
+        var assign_node = try Node.from_binary(p.alloc, NodeKind.Assign, lhs, rhs, top);
         return assign_node;
     }
     return lhs;
@@ -412,13 +406,11 @@ fn expr_statement(p: *ParseContext) !*Node {
     var top = s.top();
     if (top.equal(&SEMICOLON)) {
         s.advance();
-        var empty_stmt = try p.alloc.create(Node);
-        empty_stmt.from_block(null, top);
+        var empty_stmt = Node.from_block(p.alloc, null, top);
         return empty_stmt;
     }
-    var expr_node = try p.alloc.create(Node);
     var lhs = try expr(p);
-    expr_node.from_expr_stmt(lhs, top);
+    var expr_node = try Node.from_expr_stmt(p.alloc, lhs, top);
     s.skip(&SEMICOLON);
     return expr_node;
 }
@@ -435,24 +427,23 @@ fn stmt(p: *ParseContext) !*Node {
         stream.advance();
         var return_expr = try expr(p);
         stream.skip(&SEMICOLON);
-        var return_node = try p.alloc.create(Node);
-        return_node.from_unary(NodeKind.Ret, return_expr, stream_top);
+        var return_node = try Node.from_unary(p.alloc, NodeKind.Ret, return_expr, stream_top);
         return return_node;
     } else if (stream_top.equal(&IF)) {
         stream.advance();
         stream.skip(&LPAREN);
-        var if_node = try p.alloc.create(Node);
+        var if_node: ?*Node = null;
         var if_condition = try expr(p);
         stream.skip(&RPAREN);
         var then_stmt = try stmt(p);
         if (stream.top().equal(&ELSE)) {
             stream.advance();
             var else_stmt = try stmt(p);
-            if_node.from_if_stmt(if_condition, then_stmt, else_stmt, stream_top);
+            if_node = try Node.from_if_stmt(p.alloc, if_condition, then_stmt, else_stmt, stream_top);
         } else {
-            if_node.from_if_stmt(if_condition, then_stmt, null, stream_top);
+            if_node = try Node.from_if_stmt(p.alloc, if_condition, then_stmt, null, stream_top);
         }
-        return if_node;
+        return if_node.?;
     } else if (stream_top.equal(&FOR)) {
         stream.advance();
         stream.skip(&LPAREN);
@@ -468,8 +459,7 @@ fn stmt(p: *ParseContext) !*Node {
         }
         stream.skip(&RPAREN);
         var for_then = try stmt(p);
-        var for_node = try p.alloc.create(Node);
-        for_node.from_for(for_init, for_cond, for_inc, for_then, stream_top);
+        var for_node = try Node.from_for(p.alloc, for_init, for_cond, for_inc, for_then, stream_top);
         return for_node;
     } else if (stream_top.equal(&WHILE)) {
         stream.advance();
@@ -477,8 +467,7 @@ fn stmt(p: *ParseContext) !*Node {
         var while_cond = try expr(p);
         stream.skip(&RPAREN);
         var while_then = try stmt(p);
-        var while_node = try p.alloc.create(Node);
-        while_node.from_for(null, while_cond, null, while_then, stream_top);
+        var while_node = try Node.from_for(p.alloc, null, while_cond, null, while_then, stream_top);
         return while_node;
     } else if (stream_top.equal(&LBRACE)) {
         stream.advance();
@@ -505,8 +494,7 @@ fn compound_statement(p: *ParseContext) anyerror!*Node {
             it = statement;
         }
     }
-    var compound_stmt_node = try p.alloc.create(Node);
-    compound_stmt_node.from_block(first_stmt, s_top);
+    var compound_stmt_node = try Node.from_block(p.alloc, first_stmt, s_top);
     stream.advance();
     return compound_stmt_node;
 }
@@ -876,19 +864,16 @@ fn declaration(p: *ParseContext) !*Node {
         var typ = try declarator(p, base_type);
         var identifier = try Obj.alloc_obj(p.alloc, get_ident(typ.tok), typ);
         try p.locals.insert(0, identifier);
-        var lhs = try p.alloc.create(Node);
-        lhs.from_ident(identifier, typ.tok);
+        var lhs = try Node.from_ident(p.alloc, identifier, typ.tok);
 
         if (s.top().equal(&ASSIGN) == false) { // check if token is "="
             continue;
         }
         s.advance(); // ** consume the `=` token
         var rhs = try assign(p); // ** value of the ident
-        var declaration_node = try p.alloc.create(Node);
-        declaration_node.from_binary(NodeKind.Assign, lhs, rhs, top);
+        var declaration_node = try Node.from_binary(p.alloc, NodeKind.Assign, lhs, rhs, top);
         // Why is this converted into a ExprStmt node ?
-        var unary_node = try p.alloc.create(Node);
-        unary_node.from_unary(NodeKind.ExprStmt, declaration_node, top);
+        var unary_node = try Node.from_unary(p.alloc, NodeKind.ExprStmt, declaration_node, top);
         if (cur_node == null) {
             head_node = unary_node;
             cur_node = unary_node;
@@ -898,8 +883,7 @@ fn declaration(p: *ParseContext) !*Node {
         }
     }
     s.advance();
-    var declaration_block = try p.alloc.create(Node);
-    declaration_block.from_block(head_node, dec_block_tok);
+    var declaration_block = try Node.from_block(p.alloc, head_node, dec_block_tok);
     return declaration_block;
 }
 
