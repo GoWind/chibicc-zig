@@ -157,6 +157,14 @@ pub const Stream = struct {
         }
         return false;
     }
+
+    pub fn next(self: *Self) ?*Token {
+        var next_id = self.idx + 1;
+        if (next_id >= self.ts.items.len) {
+            return null;
+        }
+        return &self.ts.items[next_id];
+    }
 };
 // Takes a program string and a TokenList as input and
 // populates the TokenList with tokens from the program string
