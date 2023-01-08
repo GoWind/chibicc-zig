@@ -5,7 +5,7 @@ const Stream = tokenizer.Stream;
 const Allocator = std.mem.Allocator;
 const span = std.mem.span;
 const panic = std.debug.panic;
-const all_valid_chars = "()/*+-==!=<<=>>=;={}ifelse()for";
+const all_valid_chars = "()/*+-==!=<<=>>=;={}ifelse()forwhile";
 const stdout = std.io.getStdOut();
 pub const LEFT_PAREN = Token{ .punct = .{ .ptr = span(all_valid_chars[0..1]) } };
 pub const RIGHT_PAREN = Token{ .punct = .{ .ptr = span(all_valid_chars[1..2]) } };
@@ -28,11 +28,14 @@ pub const ELSE = Token{ .keyword = .{ .ptr = span(all_valid_chars[22..26]) } };
 pub const LPAREN = Token{ .punct = .{ .ptr = span(all_valid_chars[26..27]) } };
 pub const RPAREN = Token{ .punct = .{ .ptr = span(all_valid_chars[27..28]) } };
 pub const FOR = Token{ .keyword = .{ .ptr = span(all_valid_chars[28..31]) } };
+pub const WHILE = Token{ .keyword = .{ .ptr = span(all_valid_chars[31..36]) } };
 
 pub const RETURN = Token{ .keyword = .{ .ptr = span("return") } };
 // ** AST Generation ** //
 
 // Code emitter
+// For and while use the same kind
+// but in `while`, we disregard `inc`
 const NodeKind = enum { Add, Sub, Mul, Div, Unary, Num, Eq, Neq, Lt, Lte, ExprStmt, Assign, Var, Ret, Block, If, For };
 pub const Node = struct {
     const Self = @This();
@@ -46,7 +49,7 @@ pub const Node = struct {
     then: ?*Node = null,
     els: ?*Node = null,
 
-    // for loop
+    // for loop and while loop
     init: ?*Node = null,
     inc: ?*Node = null,
     val: i32 = 0, // Used when Kind = Num
@@ -240,7 +243,7 @@ fn primary(p: *ParseContext) anyerror!*Node {
         panic("unexpected token {?} to parse as primary", .{top_token});
     }
 }
-
+// stmt* }
 fn compound_statement(p: *ParseContext) anyerror!*Node {
     var first_stmt: ?*Node = null;
     var it = first_stmt;
@@ -278,6 +281,7 @@ fn expr_statement(p: *ParseContext) !*Node {
 // stmt = "return" expr ";"
 //      | "if" "(" expr ")" stmt ("else" stmt)?
 //      | "for" "(" expr-stmt expr? ; expr? ")" stmt
+//      | "while" "(" expr ")" stmt
 //      | "{" compound-stmt
 //      | expr-stmt
 fn stmt(p: *ParseContext) !*Node {
@@ -323,6 +327,15 @@ fn stmt(p: *ParseContext) !*Node {
         var for_node = try p.alloc.create(Node);
         for_node.from_for(for_init, for_cond, for_inc, for_then);
         return for_node;
+    } else if (stream_top.equal(&WHILE)) {
+        stream.consume();
+        stream.skip(&LPAREN);
+        var while_cond = try expr(p);
+        stream.skip(&RPAREN);
+        var while_then = try stmt(p);
+        var while_node = try p.alloc.create(Node);
+        while_node.from_for(null, while_cond, null, while_then);
+        return while_node;
     } else if (stream_top.equal(&LBRACE)) {
         stream.consume();
         return compound_statement(p);
@@ -473,7 +486,9 @@ fn gen_stmt(n: *Node) !void {
         },
         NodeKind.For => {
             var branch_id = update_branch_count();
-            try gen_stmt(n.init.?);
+            if (n.init) |for_init| {
+                try gen_stmt(for_init);
+            }
             try stdout_writer.print("for_label{}:\n", .{branch_id});
             if (n.cond) |for_cond| {
                 try gen_expr(for_cond);
