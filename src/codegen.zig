@@ -5,7 +5,7 @@ const Stream = tokenizer.Stream;
 const Allocator = std.mem.Allocator;
 const span = std.mem.span;
 const panic = std.debug.panic;
-const all_valid_chars = "()/*+-==!=<<=>>=";
+const all_valid_chars = "()/*+-==!=<<=>>=;";
 const stdout = std.io.getStdOut();
 pub const LEFT_PAREN = Token{ .punct = .{ .ptr = span(all_valid_chars[0..1]) } };
 pub const RIGHT_PAREN = Token{ .punct = .{ .ptr = span(all_valid_chars[1..2]) } };
@@ -19,14 +19,15 @@ pub const LT = Token{ .punct = .{ .ptr = span(all_valid_chars[10..11]) } };
 pub const LTE = Token{ .punct = .{ .ptr = span(all_valid_chars[11..13]) } };
 pub const GT = Token{ .punct = .{ .ptr = span(all_valid_chars[13..14]) } };
 pub const GTE = Token{ .punct = .{ .ptr = span(all_valid_chars[14..16]) } };
-
+pub const SEMICOLON = Token{ .punct = .{ .ptr = span(all_valid_chars[16..17]) } };
 // ** AST Generation ** //
 
 // Code emitter
-const NodeKind = enum { Add, Sub, Mul, Div, Unary, Num, Eq, Neq, Lt, Lte };
+const NodeKind = enum { Add, Sub, Mul, Div, Unary, Num, Eq, Neq, Lt, Lte, ExprStmt };
 pub const Node = struct {
     const Self = @This();
     kind: NodeKind,
+    next: ?*Node = null,
     lhs: ?*Node = null,
     rhs: ?*Node = null,
     val: i32 = 0,
@@ -173,7 +174,7 @@ fn primary(s: *Stream, alloc: Allocator) anyerror!*Node {
         panic("unexpected token {?} to parse as primary", .{top_token});
     }
 }
-//TODO: Turn this into a local variable within the `generateProgram` functions
+//TODO: Turn this into a local variable within the `codegen` function
 var depth: u32 = 0;
 // ** Code-Generation ** //
 fn push() !void {
@@ -242,8 +243,34 @@ pub fn gen_expr(node: *Node) !void {
     }
 }
 
-pub fn stream_to_ast(s: *Stream, alloc: Allocator) !*Node {
-    return expr(s, alloc);
+fn expr_statement(s: *Stream, alloc: Allocator) !*Node {
+    var expr_node = try alloc.create(Node);
+    expr_node.next = null;
+    var lhs = try expr(s, alloc);
+    expr_node.kind = NodeKind.ExprStmt;
+    expr_node.lhs = lhs;
+    s.skip(&SEMICOLON);
+    return expr_node;
+}
+// Do not not know why we have one xtra layer of
+// indirection to expr_statement
+fn stmt(s: *Stream, alloc: Allocator) !*Node {
+    return expr_statement(s, alloc);
+}
+pub fn parse(s: *Stream, alloc: Allocator) !*Node {
+    var root_node: ?*Node = null;
+    var it = root_node;
+    while (!s.is_eof()) {
+        var next = try stmt(s, alloc);
+        if (root_node == null) {
+            root_node = next;
+            it = root_node;
+        } else {
+            it.?.next = next;
+            it = next;
+        }
+    }
+    return root_node.?;
 }
 
 // In ARM assembler default alignment is a 4-byte boundart
@@ -253,11 +280,24 @@ const program_header =
     \\.align 2
     \\_start:
 ;
-pub fn generateProgram(n: *Node, alloc: Allocator) !void {
+
+fn gen_stmt(n: *Node) !void {
+    if (n.kind == NodeKind.ExprStmt) {
+        try gen_expr(n.lhs.?);
+        return;
+    }
+    panic("Invalid node {any}", .{n});
+}
+pub fn codegen(n: *Node, alloc: Allocator) !void {
     depth = 0;
     var program = try std.fmt.allocPrint(alloc, "{s}\n", .{program_header});
     try stdout.writeAll(program);
-    try gen_expr(n);
-    std.debug.assert(depth == 0);
+    var maybe_head: ?*Node = n;
+    while (maybe_head) |head| {
+        depth = 0;
+        try gen_stmt(head);
+        std.debug.assert(depth == 0);
+        maybe_head = head.next;
+    }
     try stdout.writer().print("ret\n", .{});
 }
