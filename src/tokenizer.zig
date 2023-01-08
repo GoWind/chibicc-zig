@@ -74,7 +74,7 @@ pub const Token = union(TokenKind) {
         return val_self == val_other;
     }
 
-    fn format(self: Self, comptime _: []const u8, _: std.fmt.FormatOptions, out_stream: anytype) !void {
+    pub fn format(self: Self, comptime _: []const u8, _: std.fmt.FormatOptions, out_stream: anytype) !void {
         switch (self) {
             TokenKind.num => |v| {
                 try std.fmt.format(out_stream, "TokenKind.num :D {}\n", .{v.val});
@@ -87,6 +87,9 @@ pub const Token = union(TokenKind) {
             },
             TokenKind.ident => |v| {
                 try std.fmt.format(out_stream, "TokenKind.punct :D {s}\n", .{v.ptr});
+            },
+            TokenKind.keyword => |v| {
+                try std.fmt.format(out_stream, "TokenKind.keyword {s}\n", .{v.ptr});
             },
         }
     }
