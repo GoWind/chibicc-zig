@@ -5,7 +5,7 @@ const Stream = tokenizer.Stream;
 const Allocator = std.mem.Allocator;
 const span = std.mem.span;
 const panic = std.debug.panic;
-const all_valid_chars = "()/*+-==!=<<=>>=;={}ifelse()forwhile";
+const all_valid_chars = "()/*+-==!=<<=>>=;={}ifelse()forwhile&*";
 const stdout = std.io.getStdOut();
 pub const LEFT_PAREN = Token{ .punct = .{ .ptr = span(all_valid_chars[0..1]) } };
 pub const RIGHT_PAREN = Token{ .punct = .{ .ptr = span(all_valid_chars[1..2]) } };
@@ -29,6 +29,8 @@ pub const LPAREN = Token{ .punct = .{ .ptr = span(all_valid_chars[26..27]) } };
 pub const RPAREN = Token{ .punct = .{ .ptr = span(all_valid_chars[27..28]) } };
 pub const FOR = Token{ .keyword = .{ .ptr = span(all_valid_chars[28..31]) } };
 pub const WHILE = Token{ .keyword = .{ .ptr = span(all_valid_chars[31..36]) } };
+pub const ADDR = Token{ .punct = .{ .ptr = span(all_valid_chars[36..37]) } };
+pub const DEREF = Token{ .punct = .{ .ptr = span(all_valid_chars[37..38]) } };
 
 pub const RETURN = Token{ .keyword = .{ .ptr = span("return") } };
 // ** AST Generation ** //
@@ -36,7 +38,7 @@ pub const RETURN = Token{ .keyword = .{ .ptr = span("return") } };
 // Code emitter
 // For and while use the same kind
 // but in `while`, we disregard `inc`
-const NodeKind = enum { Add, Sub, Mul, Div, Unary, Num, Eq, Neq, Lt, Lte, ExprStmt, Assign, Var, Ret, Block, If, For };
+const NodeKind = enum { Add, Sub, Mul, Div, Unary, Num, Eq, Neq, Lt, Lte, ExprStmt, Assign, Var, Ret, Block, If, For, Addr, Deref };
 
 // A variable in our C code
 const Obj = struct {
@@ -106,7 +108,7 @@ pub const Node = struct {
             NodeKind.Add, NodeKind.Sub, NodeKind.Mul, NodeKind.Div, NodeKind.Assign, NodeKind.Eq, NodeKind.Neq, NodeKind.Lt, NodeKind.Lte => {
                 try std.fmt.format(out_stream, "Node {?} starting at {?} with lhs {?} and rhs {?}\n", .{ self.kind, self.tok, self.lhs, self.rhs });
             },
-            NodeKind.Unary => {
+            NodeKind.Unary, NodeKind.Addr, NodeKind.Deref => {
                 try std.fmt.format(out_stream, "Node {?} starting at {?} with lhs {?}\n", .{ self.kind, self.tok, self.lhs });
             },
             NodeKind.Num => {
@@ -134,7 +136,8 @@ pub const Node = struct {
         }
     }
 };
-
+// unary = ( '+' | '-' | '*' | '-' | '&' | '*' ) unary
+//         | primary
 fn unary(p: *ParseContext) !*Node {
     var stream = p.stream;
     var stream_top = stream.top();
@@ -146,6 +149,18 @@ fn unary(p: *ParseContext) !*Node {
         var lhs = try unary(p);
         var unary_node = try p.alloc.create(Node);
         unary_node.from_unary(NodeKind.Unary, lhs, stream_top);
+        return unary_node;
+    } else if (stream_top.equal(&ADDR)) {
+        stream.consume();
+        var lhs = try unary(p);
+        var unary_node = try p.alloc.create(Node);
+        unary_node.from_unary(NodeKind.Addr, lhs, stream_top);
+        return unary_node;
+    } else if (stream_top.equal(&DEREF)) {
+        stream.consume();
+        var lhs = try unary(p);
+        var unary_node = try p.alloc.create(Node);
+        unary_node.from_unary(NodeKind.Deref, lhs, stream_top);
         return unary_node;
     }
     return primary(p);
@@ -276,8 +291,15 @@ fn primary(p: *ParseContext) anyerror!*Node {
     if (std.mem.eql(u8, @tagName(top_token.*), "ident")) {
         var struct_top = @field(top_token, "ident");
         var name = @field(struct_top, "ptr");
-        var variable = if (find_local_var(name, p.locals)) |local_var| local_var else try Obj.alloc_obj(p.alloc, name);
-        try p.locals.append(variable);
+        var variable: *Obj = undefined;
+        if (find_local_var(name, p.locals)) |local_var| {
+            variable = local_var;
+        } else {
+            variable = try Obj.alloc_obj(p.alloc, name);
+            // GCC stores local variables in the order : most recently
+            // initialized first. Very important
+            try p.locals.insert(0, variable);
+        }
         var variable_node = try p.alloc.create(Node);
         variable_node.from_ident(variable, top_token);
         s.consume();
@@ -432,12 +454,20 @@ const fn_epilogue =
 // At the end of this, X0 will have the addr
 // of the variable being loaded
 fn gen_addr(node: *Node) !void {
-    if (node.kind == NodeKind.Var) {
-        var offset = node.variable.?.offset;
-        try stdout.writer().print(";; variable {s} at offset {}\n", .{ node.variable.?.name, offset });
-        try stdout.writer().print("add x0, x29, #-{}\n", .{offset});
-    } else {
-        panic("Not an lvalue {?}", .{node});
+    switch (node.kind) {
+        NodeKind.Var => {
+            var offset = node.variable.?.offset;
+            try stdout.writer().print(";; variable {s} at offset {}\n", .{ node.variable.?.name, offset });
+            try stdout.writer().print("add x0, x29, #-{}\n", .{offset});
+        },
+        // I don't know how we can pass a node of type `deref` to gen_addr yet.
+        // Feels wrong, but maybe, it is for something like **x or ***x and so on ?
+        NodeKind.Deref => {
+            try gen_expr(node.lhs.?);
+        },
+        else => {
+            panic("Not an lvalue {?}", .{node});
+        },
     }
 }
 var depth: u32 = 0;
@@ -453,13 +483,18 @@ fn pop(reg: []const u8) !void {
     try stdout.writer().print("add sp, sp, #16\n", .{});
 }
 // Code generation
-pub fn gen_expr(node: *Node) !void {
+pub fn gen_expr(node: *Node) anyerror!void {
     if (node.kind == NodeKind.Num) {
         try stdout.writer().print(";; loading immediate {} at\n", .{node.val});
         try stdout.writer().print("mov X0, {}\n", .{node.val});
     } else if (node.kind == NodeKind.Var) {
         try gen_addr(node); //x0 has address of variable
         try stdout.writer().print("ldr x0, [x0]\n", .{}); // now load val of variable into x0
+    } else if (node.kind == NodeKind.Addr) {
+        try gen_addr(node.lhs.?); // node should be something like a var whose address we can obtain
+    } else if (node.kind == NodeKind.Deref) {
+        try gen_expr(node.lhs.?); // x0 now should have an address (from a variable ideally)
+        try stdout.writer().print("ldr x0, [x0]\n", .{});
     } else if (node.kind == NodeKind.Unary) {
         try gen_expr(node.lhs.?);
         try stdout.writer().print("neg x0, x0\n", .{});
@@ -581,6 +616,7 @@ pub fn codegen(f: *Function) !void {
     assign_lvar_offsets(f);
     var stdout_writer = stdout.writer();
     try stdout_writer.print("{s}\n", .{fn_prologue});
+    try stdout_writer.print(";; making space for local variables in stack\n", .{});
     try stdout_writer.print("sub sp, sp, #{}\n", .{f.stack_size});
     try gen_stmt(f.fnbody);
     try stdout_writer.print("add sp, sp, #{}\n", .{f.stack_size});
@@ -605,6 +641,7 @@ fn assign_lvar_offsets(prog: *Function) void {
         local.*.offset = offset;
     }
     prog.*.stack_size = align_to(offset, 16);
+    // std.debug.print(";;stack_size is {}\n", .{align_to(offset, 16)});
 }
 
 fn find_local_var(ident: []const u8, locals: ObjList) ?*Obj {

@@ -77,16 +77,16 @@ pub const Token = union(TokenKind) {
     pub fn format(self: Self, comptime _: []const u8, _: std.fmt.FormatOptions, out_stream: anytype) !void {
         switch (self) {
             TokenKind.num => |v| {
-                try std.fmt.format(out_stream, "TokenKind.num :D {}\n", .{v.val});
+                try std.fmt.format(out_stream, "TokenKind.num {}\n", .{v.val});
             },
             TokenKind.punct => |v| {
-                try std.fmt.format(out_stream, "TokenKind.punct :D {s}\n", .{v.ptr});
+                try std.fmt.format(out_stream, "TokenKind.punct: '{s}'\n", .{v.ptr});
             },
             TokenKind.eof => {
-                try std.fmt.format(out_stream, "TokenKind.eof :D \n", .{});
+                try std.fmt.format(out_stream, "TokenKind.eof \n", .{});
             },
             TokenKind.ident => |v| {
-                try std.fmt.format(out_stream, "TokenKind.punct :D {s}\n", .{v.ptr});
+                try std.fmt.format(out_stream, "TokenKind.ident : '{s}'\n", .{v.ptr});
             },
             TokenKind.keyword => |v| {
                 try std.fmt.format(out_stream, "TokenKind.keyword {s}\n", .{v.ptr});
@@ -157,7 +157,7 @@ pub fn tokenize(stream_p: *[*:0]u8, list: *TokenList) !void {
             continue;
             // Numbers
         } else if (ascii.isDigit(stream[0]) == true) {
-            //notice that we are modifying stream here
+            // Notice that we are mutating `stream` here
             var number = strtol(&stream);
             try list.append(Token{ .num = .{ .val = number.? } });
             // Identifiers and Keywords
@@ -195,7 +195,7 @@ pub fn tokenize(stream_p: *[*:0]u8, list: *TokenList) !void {
 // to point to the first location after the number
 // E;g. if yp = "+123abcd", after strtol(&yp), yp[0] is now 'a'
 fn strtol(yp: *[*:0]const u8) ?i32 {
-    var y = yp.*;
+    var y = yp.*; // y is now a C string
     if (y[0] == 0) {
         return null;
     }
