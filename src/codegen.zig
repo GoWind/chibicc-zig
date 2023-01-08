@@ -86,7 +86,8 @@ pub const Node = struct {
     val: i32 = 0, // Used when Kind = Num
     variable: ?*Obj = null, // Used when Kind = var
     tok: ?*const Token = null, // The token in the parse stream that was
-    fn_name: []const u8 = span(""), // Use when Kind = Funcall
+    fn_name: []const u8 = span(""), // Used when Kind = Funcall
+    fn_args: NodeList = undefined, //  Used when Kind = Funcall
     //used as a basis to create this node
     // self is a pointer into global heap region or a fn-local heap
     pub fn from_binary(alloc: Allocator, kind: NodeKind, lhs: ?*Node, rhs: ?*Node, tok: ?*Token) !*Self {
@@ -132,9 +133,9 @@ pub const Node = struct {
         self.* = .{ .kind = NodeKind.For, .init = init, .cond = cond, .inc = inc, .then = then, .tok = tok };
         return self;
     }
-    pub fn from_fncall(alloc: Allocator, fn_name: []const u8, tok: ?*Token) !*Self {
+    pub fn from_fncall(alloc: Allocator, fn_name: []const u8, fn_args: NodeList, tok: ?*Token) !*Self {
         var self = try alloc.create(Self);
-        self.* = .{ .kind = NodeKind.Funcall, .fn_name = try alloc.dupe(u8, fn_name), .tok = tok };
+        self.* = .{ .kind = NodeKind.Funcall, .fn_name = try alloc.dupe(u8, fn_name), .fn_args = fn_args, .tok = tok };
         return self;
     }
 
@@ -174,6 +175,7 @@ pub const Node = struct {
         }
     }
 };
+const NodeList = std.ArrayList(*Node);
 
 fn new_add(p: *ParseContext, lhs: ?*Node, rhs: ?*Node, tok: *Token) !*Node {
     if (lhs) |l| add_type(p.alloc, l);
@@ -236,6 +238,23 @@ fn new_sub(p: *ParseContext, lhs: ?*Node, rhs: ?*Node, tok: *Token) !*Node {
     panic("Invalid token for Subtration operation {?}\n", .{tok});
 }
 
+fn fncall(p: *ParseContext) !*Node {
+    var s = p.stream;
+    var top = s.top();
+    var args_list = NodeList.init(p.alloc);
+    s.advance(); // consume fnname
+    s.advance(); // consume "("
+    while (s.top().equal(&RPAREN) == false) {
+        if (args_list.items.len != 0) {
+            s.skip(&COMMA);
+        }
+        var arg = try assign(p);
+        try args_list.append(arg);
+    }
+    s.skip(&RPAREN);
+    var fn_node = try Node.from_fncall(p.alloc, top.get_ident(), args_list, top);
+    return fn_node;
+}
 // primary =      '(' expr ')'
 //             |  variable
 //             |  number
@@ -252,11 +271,7 @@ fn primary(p: *ParseContext) anyerror!*Node {
     switch (top_token.*) {
         TokenKind.ident => |v| {
             if (s.next().?.equal(&LPAREN)) { // fn call
-                var fncall_node = try Node.from_fncall(p.alloc, v.ptr, top_token);
-                s.advance(); //consume fn name
-                s.advance(); // consume (
-                s.skip(&RPAREN);
-                return fncall_node;
+                return fncall(p);
             }
             var variable: *Obj = undefined;
             if (find_local_var(v.ptr, p.locals)) |local_var| {
@@ -567,6 +582,7 @@ fn gen_addr(node: *Node) !void {
     }
 }
 var depth: u32 = 0;
+var args_regs = [_][]const u8{ "x0", "x1", "x2", "x3", "x4", "x5", "x6", "x7" };
 // ** Code-Generation ** //
 fn push() !void {
     depth += 1;
@@ -602,7 +618,18 @@ pub fn gen_expr(node: *Node) anyerror!void {
         try pop(span("x1")); // x1 has addr of variable
         try stdout.writer().print("str X0, [X1]\n", .{});
     } else if (node.kind == NodeKind.Funcall) {
-        try stdout.writer().print("mov x0, #0\n", .{});
+        var args_len: usize = 0;
+        for (node.fn_args.items) |arg| {
+            try gen_expr(arg);
+            try push();
+            args_len += 1;
+        }
+        while (args_len > 0) : (args_len -= 1) {
+            try pop(args_regs[args_len - 1]);
+            if (args_len == 0) {
+                break;
+            }
+        }
         // I do not know how to solve this nicely yet, but
         // clang seems to emit symbols with a leading `_` for C fns
         // eg. if you have a fn int badaxe() in a C file that is compiled into
@@ -887,7 +914,7 @@ fn declaration(p: *ParseContext) !*Node {
         i += 1;
         var top = s.top();
         var typ = try declarator(p, base_type);
-        var identifier = try Obj.alloc_obj(p.alloc, get_ident(typ.tok), typ);
+        var identifier = try Obj.alloc_obj(p.alloc, typ.tok.get_ident(), typ);
         try p.locals.insert(0, identifier);
         var lhs = try Node.from_ident(p.alloc, identifier, typ.tok);
 
@@ -910,15 +937,4 @@ fn declaration(p: *ParseContext) !*Node {
     s.advance();
     var declaration_block = try Node.from_block(p.alloc, head_node, dec_block_tok);
     return declaration_block;
-}
-
-fn get_ident(tok: *const Token) []const u8 {
-    switch (tok.*) {
-        TokenKind.ident => |v| {
-            return v.ptr;
-        },
-        else => {
-            panic("expected .ident token, got {?}\n", .{tok});
-        },
-    }
 }

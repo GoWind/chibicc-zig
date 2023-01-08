@@ -74,6 +74,17 @@ pub const Token = union(TokenKind) {
         return val_self == val_other;
     }
 
+    pub fn get_ident(tok: *const Self) []const u8 {
+        switch (tok.*) {
+            TokenKind.ident => |v| {
+                return v.ptr;
+            },
+            else => {
+                panic("expected .ident token, got {?}\n", .{tok});
+            },
+        }
+    }
+
     pub fn format(self: Self, comptime _: []const u8, _: std.fmt.FormatOptions, out_stream: anytype) !void {
         switch (self) {
             TokenKind.num => |v| {
