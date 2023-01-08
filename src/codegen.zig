@@ -1,11 +1,12 @@
 const std = @import("std");
 const tokenizer = @import("./tokenizer.zig");
 const Token = tokenizer.Token;
+const TokenKind = tokenizer.TokenKind;
 const Stream = tokenizer.Stream;
 const Allocator = std.mem.Allocator;
 const span = std.mem.span;
 const panic = std.debug.panic;
-const all_valid_chars = "()/*+-==!=<<=>>=;={}ifelse()forwhile&*";
+const all_valid_chars = "()/*+-==!=<<=>>=;={}ifelse()forwhile&*,";
 const stdout = std.io.getStdOut();
 pub const LEFT_PAREN = Token{ .punct = .{ .ptr = span(all_valid_chars[0..1]) } };
 pub const RIGHT_PAREN = Token{ .punct = .{ .ptr = span(all_valid_chars[1..2]) } };
@@ -31,8 +32,10 @@ pub const FOR = Token{ .keyword = .{ .ptr = span(all_valid_chars[28..31]) } };
 pub const WHILE = Token{ .keyword = .{ .ptr = span(all_valid_chars[31..36]) } };
 pub const ADDR = Token{ .punct = .{ .ptr = span(all_valid_chars[36..37]) } };
 pub const DEREF = Token{ .punct = .{ .ptr = span(all_valid_chars[37..38]) } };
+pub const COMMA = Token{ .punct = .{ .ptr = span(all_valid_chars[38..39]) } };
 
 pub const RETURN = Token{ .keyword = .{ .ptr = span("return") } };
+pub const INT = Token{ .keyword = .{ .ptr = span("int") } };
 // ** AST Generation ** //
 
 // Code emitter
@@ -42,22 +45,21 @@ const NodeKind = enum { Add, Sub, Mul, Div, Unary, Num, Eq, Neq, Lt, Lte, ExprSt
 
 const TypeKind = enum { Int, Ptr };
 // Type information about variables
-const Type = struct {
-    kind: TypeKind,
-    base: ?*const Type,
-};
+const Type = struct { kind: TypeKind, base: ?*const Type, tok: *const Token };
 
-const IntBaseType = Type{ .kind = TypeKind.Int, .base = null };
+var IntBaseType = Type{ .kind = TypeKind.Int, .base = null, .tok = &INT };
 
 // A variable in our C code
 const Obj = struct {
     name: []u8,
     offset: usize = 0,
+    typ: *Type,
     const Self = @This();
-    fn alloc_obj(alloc: Allocator, name: []const u8) !*Obj {
+    fn alloc_obj(alloc: Allocator, name: []const u8, ty: *Type) !*Obj {
         var obj = try alloc.create(Self);
         obj.offset = 0;
         obj.name = try alloc.dupe(u8, name);
+        obj.typ = ty;
         return obj;
     }
 };
@@ -83,7 +85,7 @@ pub const Node = struct {
     inc: ?*Node = null,
     val: i32 = 0, // Used when Kind = Num
     variable: ?*Obj = null, // Used when Kind = var
-    tok: ?*Token = null, // The token in the parse stream that was
+    tok: ?*const Token = null, // The token in the parse stream that was
     //used as a basis to create this node
     // self is a pointer into global heap region or a fn-local heap
     fn from_binary(self: *Self, kind: NodeKind, lhs: ?*Node, rhs: ?*Node, tok: ?*Token) void {
@@ -99,7 +101,7 @@ pub const Node = struct {
     fn from_expr_stmt(self: *Self, lhs: ?*Node, tok: ?*Token) void {
         self.* = .{ .kind = NodeKind.ExprStmt, .lhs = lhs, .tok = tok };
     }
-    fn from_ident(self: *Self, variable: *Obj, tok: ?*Token) void {
+    fn from_ident(self: *Self, variable: *Obj, tok: ?*const Token) void {
         self.* = .{ .kind = NodeKind.Var, .variable = variable, .tok = tok };
     }
     fn from_block(self: *Self, body: ?*Node, tok: ?*Token) void {
@@ -226,7 +228,7 @@ fn primary(p: *ParseContext) anyerror!*Node {
     var top_token = s.top();
     if (top_token.equal(&LEFT_PAREN)) {
         // var top_idx = s.pos();
-        s.consume();
+        s.advance();
         var expression = try expr(p);
         s.skip(&RIGHT_PAREN);
         return expression;
@@ -238,14 +240,11 @@ fn primary(p: *ParseContext) anyerror!*Node {
         if (find_local_var(name, p.locals)) |local_var| {
             variable = local_var;
         } else {
-            variable = try Obj.alloc_obj(p.alloc, name);
-            // GCC stores local variables in the order : most recently
-            // initialized first. Very important
-            try p.locals.insert(0, variable);
+            panic("Undefined variable {s}\n", .{name});
         }
         var variable_node = try p.alloc.create(Node);
         variable_node.from_ident(variable, top_token);
-        s.consume();
+        s.advance();
         return variable_node;
     }
 
@@ -254,7 +253,7 @@ fn primary(p: *ParseContext) anyerror!*Node {
         var val = @field(struct_top, "val");
         var num_node = try p.alloc.create(Node);
         num_node.from_num(val, top_token);
-        s.consume();
+        s.advance();
         return num_node;
     } else {
         panic("unexpected token {?} to parse as primary\n", .{top_token.*});
@@ -267,23 +266,23 @@ fn unary(p: *ParseContext) !*Node {
     var stream = p.stream;
     var stream_top = stream.top();
     if (stream_top.equal(&PLUS)) {
-        stream.consume();
+        stream.advance();
         return unary(p);
     } else if (stream_top.equal(&MINUS)) {
-        stream.consume();
+        stream.advance();
         var lhs = try unary(p);
         var unary_node = try p.alloc.create(Node);
         //TODO: Add `Neg` kind here
         unary_node.from_unary(NodeKind.Unary, lhs, stream_top);
         return unary_node;
     } else if (stream_top.equal(&ADDR)) {
-        stream.consume();
+        stream.advance();
         var lhs = try unary(p);
         var unary_node = try p.alloc.create(Node);
         unary_node.from_unary(NodeKind.Addr, lhs, stream_top);
         return unary_node;
     } else if (stream_top.equal(&DEREF)) {
-        stream.consume();
+        stream.advance();
         var lhs = try unary(p);
         var unary_node = try p.alloc.create(Node);
         unary_node.from_unary(NodeKind.Deref, lhs, stream_top);
@@ -300,7 +299,7 @@ fn mul(p: *ParseContext) !*Node {
         var stream_top = s.top();
         if ((stream_top.equal(&MUL) == true) or (stream_top.equal(&DIV) == true)) {
             var op = if (stream_top.equal(&MUL)) NodeKind.Mul else NodeKind.Div;
-            s.consume();
+            s.advance();
             var rhs = try unary(p);
             var expr_node = try p.alloc.create(Node);
             expr_node.from_binary(op, lhs, rhs, stream_top);
@@ -320,7 +319,7 @@ fn add(p: *ParseContext) !*Node {
         var stream_top = s.top();
         if ((stream_top.equal(&PLUS) == true) or (stream_top.equal(&MINUS) == true)) {
             var op = if (stream_top.equal(&PLUS)) NodeKind.Add else NodeKind.Sub;
-            s.consume();
+            s.advance();
             var rhs = try mul(p);
             var expr_node = if (op == NodeKind.Add) try new_add(p, lhs, rhs, stream_top) else try new_sub(p, lhs, rhs, stream_top);
             lhs = expr_node;
@@ -339,13 +338,13 @@ fn relational(p: *ParseContext) !*Node {
         var stream_top = stream.top();
         if (stream_top.equal(&LT)) {
             var rel_node = try p.alloc.create(Node);
-            stream.consume();
+            stream.advance();
             var rhs = try add(p);
             rel_node.from_binary(NodeKind.Lt, lhs, rhs, stream_top);
             lhs = rel_node;
         } else if (stream_top.equal(&LTE)) {
             var rel_node = try p.alloc.create(Node);
-            stream.consume();
+            stream.advance();
             var rhs = try add(p);
             rel_node.from_binary(NodeKind.Lte, lhs, rhs, stream_top);
             lhs = rel_node;
@@ -353,13 +352,13 @@ fn relational(p: *ParseContext) !*Node {
             // we can just switch lhs and rhs with the same Lt, Lte ops
         } else if (stream_top.equal(&GT)) {
             var rel_node = try p.alloc.create(Node);
-            stream.consume();
+            stream.advance();
             var rhs = try add(p);
             rel_node.from_binary(NodeKind.Lt, rhs, lhs, stream_top);
             lhs = rel_node;
         } else if (stream_top.equal(&GTE)) {
             var rel_node = try p.alloc.create(Node);
-            stream.consume();
+            stream.advance();
             var rhs = try add(p);
             rel_node.from_binary(NodeKind.Lte, rhs, lhs, stream_top);
             lhs = rel_node;
@@ -379,7 +378,7 @@ fn equality(p: *ParseContext) !*Node {
         if (stream_top.equal(&EQEQ) or stream_top.equal(&NOTEQ)) {
             var op = if (stream_top.equal(&EQEQ)) NodeKind.Eq else NodeKind.Neq;
             var op_tok = stream_top;
-            stream.consume();
+            stream.advance();
             var rhs = try relational(p);
             var rel_node = try p.alloc.create(Node);
             rel_node.from_binary(op, lhs, rhs, op_tok);
@@ -396,7 +395,7 @@ fn assign(p: *ParseContext) !*Node {
     var stream = p.stream;
     var top = stream.top();
     if (top.equal(&ASSIGN)) {
-        stream.consume();
+        stream.advance();
         var rhs = try assign(p);
         var assign_node = try p.alloc.create(Node);
         assign_node.from_binary(NodeKind.Assign, lhs, rhs, top);
@@ -414,7 +413,7 @@ fn expr_statement(p: *ParseContext) !*Node {
     var s = p.stream;
     var top = s.top();
     if (top.equal(&SEMICOLON)) {
-        s.consume();
+        s.advance();
         var empty_stmt = try p.alloc.create(Node);
         empty_stmt.from_block(null, top);
         return empty_stmt;
@@ -435,21 +434,21 @@ fn stmt(p: *ParseContext) !*Node {
     var stream = p.stream;
     var stream_top = stream.top();
     if (stream_top.equal(&RETURN)) {
-        stream.consume();
+        stream.advance();
         var return_expr = try expr(p);
         stream.skip(&SEMICOLON);
         var return_node = try p.alloc.create(Node);
         return_node.from_unary(NodeKind.Ret, return_expr, stream_top);
         return return_node;
     } else if (stream_top.equal(&IF)) {
-        stream.consume();
+        stream.advance();
         stream.skip(&LPAREN);
         var if_node = try p.alloc.create(Node);
         var if_condition = try expr(p);
         stream.skip(&RPAREN);
         var then_stmt = try stmt(p);
         if (stream.top().equal(&ELSE)) {
-            stream.consume();
+            stream.advance();
             var else_stmt = try stmt(p);
             if_node.from_if_stmt(if_condition, then_stmt, else_stmt, stream_top);
         } else {
@@ -457,7 +456,7 @@ fn stmt(p: *ParseContext) !*Node {
         }
         return if_node;
     } else if (stream_top.equal(&FOR)) {
-        stream.consume();
+        stream.advance();
         stream.skip(&LPAREN);
         var for_init = try expr_statement(p);
         var for_cond: ?*Node = null;
@@ -475,7 +474,7 @@ fn stmt(p: *ParseContext) !*Node {
         for_node.from_for(for_init, for_cond, for_inc, for_then, stream_top);
         return for_node;
     } else if (stream_top.equal(&WHILE)) {
-        stream.consume();
+        stream.advance();
         stream.skip(&LPAREN);
         var while_cond = try expr(p);
         stream.skip(&RPAREN);
@@ -484,21 +483,21 @@ fn stmt(p: *ParseContext) !*Node {
         while_node.from_for(null, while_cond, null, while_then, stream_top);
         return while_node;
     } else if (stream_top.equal(&LBRACE)) {
-        stream.consume();
+        stream.advance();
         return compound_statement(p);
     } else {
         return expr_statement(p);
     }
 }
 
-// stmt* }
+// (declaration | stmt)* }
 fn compound_statement(p: *ParseContext) anyerror!*Node {
     var first_stmt: ?*Node = null;
     var it = first_stmt;
     var stream = p.stream;
     var s_top = stream.top();
     while (stream.top().equal(&RBRACE) == false) {
-        var statement = try stmt(p);
+        var statement = if (stream.top().equal(&INT)) try declaration(p) else try stmt(p);
         add_type(p.alloc, statement);
         if (first_stmt == null) {
             first_stmt = statement;
@@ -510,7 +509,7 @@ fn compound_statement(p: *ParseContext) anyerror!*Node {
     }
     var compound_stmt_node = try p.alloc.create(Node);
     compound_stmt_node.from_block(first_stmt, s_top);
-    stream.consume();
+    stream.advance();
     return compound_stmt_node;
 }
 
@@ -798,18 +797,20 @@ fn add_type(ally: Allocator, n: *Node) void {
         NodeKind.Add, NodeKind.Unary, NodeKind.Sub, NodeKind.Mul, NodeKind.Div, NodeKind.Assign => {
             n.n_type = n.lhs.?.n_type;
         },
-        NodeKind.Eq, NodeKind.Neq, NodeKind.Lt, NodeKind.Lte, NodeKind.Var, NodeKind.Num => {
+        NodeKind.Eq, NodeKind.Neq, NodeKind.Lt, NodeKind.Lte, NodeKind.Num => {
             n.n_type = &IntBaseType;
+        },
+        NodeKind.Var => {
+            n.n_type = n.variable.?.typ;
         },
         NodeKind.Addr => {
             n.n_type = pointer_to(ally, n.lhs.?.n_type.?) catch panic("failed to create Pointer type to {?}\n", .{n.lhs.?.n_type.?});
         },
         NodeKind.Deref => {
-            if (n.lhs.?.n_type.?.kind == TypeKind.Ptr) {
-                n.n_type = n.lhs.?.n_type.?.base;
-            } else {
-                n.n_type = &IntBaseType;
+            if (n.lhs.?.n_type.?.kind != TypeKind.Ptr) {
+                panic("invalid pointer dereference {?}\n", .{n.lhs});
             }
+            n.n_type = n.lhs.?.n_type.?.base;
         },
         else => {
             // We just ignore all the other types of nodes
@@ -822,4 +823,94 @@ fn pointer_to(alloc: Allocator, base: *const Type) !*Type {
     derived.kind = TypeKind.Ptr;
     derived.base = base;
     return derived;
+}
+
+// declspec = "int"
+fn declspec(p: *ParseContext) *Type {
+    var stream = p.stream;
+    stream.skip(&INT);
+    return &IntBaseType;
+}
+
+// declarator = "*"* ident
+// (either a bare identifier or a series of derefs followed by an identifier)
+// (eg; x or *x or **y)
+fn declarator(p: *ParseContext, typ: *Type) !*Type {
+    var stream = p.stream;
+    var actual_type = typ;
+    while (stream.consume(&DEREF)) {
+        actual_type = try pointer_to(p.alloc, actual_type);
+    }
+    var top = stream.top();
+    switch (top.*) {
+        TokenKind.ident => {
+            actual_type.tok = stream.top();
+            stream.advance();
+            return actual_type;
+        },
+        else => {
+            panic("Expected Ident token for declarator, got {?}\n", .{stream.top()});
+        },
+    }
+}
+
+//declaration = declspec (declarator ("=" expr)? ("," declarator ("=" expr)?)*)? ";"
+// e.g: int x;
+// int x=5;
+// int x=5,y;
+// int x,y=4;
+// int z,c;
+// and also just `int` ?
+fn declaration(p: *ParseContext) !*Node {
+    var base_type = declspec(p);
+    var head_node: ?*Node = null;
+    var cur_node: ?*Node = head_node;
+    var i: usize = 0;
+    var s = p.stream;
+    var dec_block_tok = s.top();
+    while (s.top().equal(&SEMICOLON) == false) {
+        if (i > 0) { // check for comma before every declaration after the first one
+            s.skip(&COMMA);
+        }
+        i += 1;
+        var top = s.top();
+        var typ = try declarator(p, base_type);
+        var identifier = try Obj.alloc_obj(p.alloc, get_ident(typ.tok), typ);
+        try p.locals.insert(0, identifier);
+        var lhs = try p.alloc.create(Node);
+        lhs.from_ident(identifier, typ.tok);
+
+        if (s.top().equal(&ASSIGN) == false) { // check if token is "="
+            continue;
+        }
+        s.advance();
+        var rhs = try assign(p);
+        var declaration_node = try p.alloc.create(Node);
+        declaration_node.from_binary(NodeKind.Assign, lhs, rhs, top);
+        // Why is this converted into a unary node ?
+        var unary_node = try p.alloc.create(Node);
+        unary_node.from_unary(NodeKind.ExprStmt, declaration_node, top);
+        if (cur_node == null) {
+            head_node = unary_node;
+            cur_node = unary_node;
+        } else {
+            cur_node.?.next = unary_node;
+            cur_node = unary_node;
+        }
+    }
+    s.advance();
+    var declaration_block = try p.alloc.create(Node);
+    declaration_block.from_block(head_node, dec_block_tok);
+    return declaration_block;
+}
+
+fn get_ident(tok: *const Token) []const u8 {
+    switch (tok.*) {
+        TokenKind.ident => |v| {
+            return v.ptr;
+        },
+        else => {
+            panic("expected .ident token, got {?}\n", .{tok});
+        },
+    }
 }
