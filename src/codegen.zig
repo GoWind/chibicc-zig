@@ -218,148 +218,9 @@ fn new_sub(p: *ParseContext, lhs: ?*Node, rhs: ?*Node, tok: *Token) !*Node {
     panic("Invalid token for Subtration operation {?}\n", .{tok});
 }
 
-// unary = ( '+' | '-' | '*' | '-' | '&' | '*' ) unary
-//         | primary
-fn unary(p: *ParseContext) !*Node {
-    var stream = p.stream;
-    var stream_top = stream.top();
-    if (stream_top.equal(&PLUS)) {
-        stream.consume();
-        return unary(p);
-    } else if (stream_top.equal(&MINUS)) {
-        stream.consume();
-        var lhs = try unary(p);
-        var unary_node = try p.alloc.create(Node);
-        //TODO: Add `Neg` kind here
-        unary_node.from_unary(NodeKind.Unary, lhs, stream_top);
-        return unary_node;
-    } else if (stream_top.equal(&ADDR)) {
-        stream.consume();
-        var lhs = try unary(p);
-        var unary_node = try p.alloc.create(Node);
-        unary_node.from_unary(NodeKind.Addr, lhs, stream_top);
-        return unary_node;
-    } else if (stream_top.equal(&DEREF)) {
-        stream.consume();
-        var lhs = try unary(p);
-        var unary_node = try p.alloc.create(Node);
-        unary_node.from_unary(NodeKind.Deref, lhs, stream_top);
-        return unary_node;
-    }
-    return primary(p);
-}
-fn mul(p: *ParseContext) !*Node {
-    var lhs = try unary(p);
-    var loop = true;
-    var s = p.stream;
-    while (loop == true) {
-        var stream_top = s.top();
-        if ((stream_top.equal(&MUL) == true) or (stream_top.equal(&DIV) == true)) {
-            var op = if (stream_top.equal(&MUL)) NodeKind.Mul else NodeKind.Div;
-            s.consume();
-            var rhs = try unary(p);
-            var expr_node = try p.alloc.create(Node);
-            expr_node.from_binary(op, lhs, rhs, stream_top);
-            lhs = expr_node;
-        } else {
-            loop = false;
-        }
-    }
-    return lhs;
-}
-
-fn assign(p: *ParseContext) !*Node {
-    var lhs = try equality(p);
-    var stream = p.stream;
-    var top = stream.top();
-    if (top.equal(&ASSIGN)) {
-        stream.consume();
-        var rhs = try assign(p);
-        var assign_node = try p.alloc.create(Node);
-        assign_node.from_binary(NodeKind.Assign, lhs, rhs, top);
-        return assign_node;
-    }
-    return lhs;
-}
-fn expr(p: *ParseContext) !*Node {
-    return assign(p);
-}
-fn add(p: *ParseContext) !*Node {
-    var lhs = try mul(p);
-    var loop = true;
-    var s = p.stream;
-    while (loop == true) {
-        var stream_top = s.top();
-        if ((stream_top.equal(&PLUS) == true) or (stream_top.equal(&MINUS) == true)) {
-            var op = if (stream_top.equal(&PLUS)) NodeKind.Add else NodeKind.Sub;
-            s.consume();
-            var rhs = try mul(p);
-            var expr_node = if (op == NodeKind.Add) try new_add(p, lhs, rhs, stream_top) else try new_sub(p, lhs, rhs, stream_top);
-            lhs = expr_node;
-        } else {
-            loop = false;
-        }
-    }
-    return lhs;
-}
-fn equality(p: *ParseContext) !*Node {
-    var lhs = try relational(p);
-    var loop = true;
-    var stream = p.stream;
-    while (loop) {
-        var stream_top = stream.top();
-        if (stream_top.equal(&EQEQ) or stream_top.equal(&NOTEQ)) {
-            var op = if (stream_top.equal(&EQEQ)) NodeKind.Eq else NodeKind.Neq;
-            var op_tok = stream_top;
-            stream.consume();
-            var rhs = try relational(p);
-            var rel_node = try p.alloc.create(Node);
-            rel_node.from_binary(op, lhs, rhs, op_tok);
-            lhs = rel_node;
-        } else {
-            loop = false;
-        }
-    }
-    return lhs;
-}
-fn relational(p: *ParseContext) !*Node {
-    var lhs = try add(p);
-    var loop = true;
-    var stream = p.stream;
-    while (loop) {
-        var stream_top = stream.top();
-        if (stream_top.equal(&LT)) {
-            var rel_node = try p.alloc.create(Node);
-            stream.consume();
-            var rhs = try add(p);
-            rel_node.from_binary(NodeKind.Lt, lhs, rhs, stream_top);
-            lhs = rel_node;
-        } else if (stream_top.equal(&LTE)) {
-            var rel_node = try p.alloc.create(Node);
-            stream.consume();
-            var rhs = try add(p);
-            rel_node.from_binary(NodeKind.Lte, lhs, rhs, stream_top);
-            lhs = rel_node;
-            // Optimization, we need not have a NodeKind.Gte
-            // we can just switch lhs and rhs with the same Lt, Lte ops
-        } else if (stream_top.equal(&GT)) {
-            var rel_node = try p.alloc.create(Node);
-            stream.consume();
-            var rhs = try add(p);
-            rel_node.from_binary(NodeKind.Lt, rhs, lhs, stream_top);
-            lhs = rel_node;
-        } else if (stream_top.equal(&GTE)) {
-            var rel_node = try p.alloc.create(Node);
-            stream.consume();
-            var rhs = try add(p);
-            rel_node.from_binary(NodeKind.Lte, rhs, lhs, stream_top);
-            lhs = rel_node;
-        } else {
-            loop = false;
-        }
-    }
-    return lhs;
-}
+// primary =      '(' expr ')'
+//             |  variable
+//             |  number
 fn primary(p: *ParseContext) anyerror!*Node {
     var s = p.stream;
     var top_token = s.top();
@@ -399,28 +260,155 @@ fn primary(p: *ParseContext) anyerror!*Node {
         panic("unexpected token {?} to parse as primary\n", .{top_token.*});
     }
 }
-// stmt* }
-fn compound_statement(p: *ParseContext) anyerror!*Node {
-    var first_stmt: ?*Node = null;
-    var it = first_stmt;
+
+// unary = ( '+' | '-' | '*' | '&' | '*' ) unary
+//         | primary
+fn unary(p: *ParseContext) !*Node {
     var stream = p.stream;
-    var s_top = stream.top();
-    while (stream.top().equal(&RBRACE) == false) {
-        var statement = try stmt(p);
-        add_type(p.alloc, statement);
-        if (first_stmt == null) {
-            first_stmt = statement;
-            it = statement;
+    var stream_top = stream.top();
+    if (stream_top.equal(&PLUS)) {
+        stream.consume();
+        return unary(p);
+    } else if (stream_top.equal(&MINUS)) {
+        stream.consume();
+        var lhs = try unary(p);
+        var unary_node = try p.alloc.create(Node);
+        //TODO: Add `Neg` kind here
+        unary_node.from_unary(NodeKind.Unary, lhs, stream_top);
+        return unary_node;
+    } else if (stream_top.equal(&ADDR)) {
+        stream.consume();
+        var lhs = try unary(p);
+        var unary_node = try p.alloc.create(Node);
+        unary_node.from_unary(NodeKind.Addr, lhs, stream_top);
+        return unary_node;
+    } else if (stream_top.equal(&DEREF)) {
+        stream.consume();
+        var lhs = try unary(p);
+        var unary_node = try p.alloc.create(Node);
+        unary_node.from_unary(NodeKind.Deref, lhs, stream_top);
+        return unary_node;
+    }
+    return primary(p);
+}
+
+fn mul(p: *ParseContext) !*Node {
+    var lhs = try unary(p);
+    var loop = true;
+    var s = p.stream;
+    while (loop == true) {
+        var stream_top = s.top();
+        if ((stream_top.equal(&MUL) == true) or (stream_top.equal(&DIV) == true)) {
+            var op = if (stream_top.equal(&MUL)) NodeKind.Mul else NodeKind.Div;
+            s.consume();
+            var rhs = try unary(p);
+            var expr_node = try p.alloc.create(Node);
+            expr_node.from_binary(op, lhs, rhs, stream_top);
+            lhs = expr_node;
         } else {
-            it.?.next = statement;
-            it = statement;
+            loop = false;
         }
     }
-    var compound_stmt_node = try p.alloc.create(Node);
-    compound_stmt_node.from_block(first_stmt, s_top);
-    stream.consume();
-    return compound_stmt_node;
+    return lhs;
 }
+
+fn add(p: *ParseContext) !*Node {
+    var lhs = try mul(p);
+    var loop = true;
+    var s = p.stream;
+    while (loop == true) {
+        var stream_top = s.top();
+        if ((stream_top.equal(&PLUS) == true) or (stream_top.equal(&MINUS) == true)) {
+            var op = if (stream_top.equal(&PLUS)) NodeKind.Add else NodeKind.Sub;
+            s.consume();
+            var rhs = try mul(p);
+            var expr_node = if (op == NodeKind.Add) try new_add(p, lhs, rhs, stream_top) else try new_sub(p, lhs, rhs, stream_top);
+            lhs = expr_node;
+        } else {
+            loop = false;
+        }
+    }
+    return lhs;
+}
+
+fn relational(p: *ParseContext) !*Node {
+    var lhs = try add(p);
+    var loop = true;
+    var stream = p.stream;
+    while (loop) {
+        var stream_top = stream.top();
+        if (stream_top.equal(&LT)) {
+            var rel_node = try p.alloc.create(Node);
+            stream.consume();
+            var rhs = try add(p);
+            rel_node.from_binary(NodeKind.Lt, lhs, rhs, stream_top);
+            lhs = rel_node;
+        } else if (stream_top.equal(&LTE)) {
+            var rel_node = try p.alloc.create(Node);
+            stream.consume();
+            var rhs = try add(p);
+            rel_node.from_binary(NodeKind.Lte, lhs, rhs, stream_top);
+            lhs = rel_node;
+            // Optimization, we need not have a NodeKind.Gte
+            // we can just switch lhs and rhs with the same Lt, Lte ops
+        } else if (stream_top.equal(&GT)) {
+            var rel_node = try p.alloc.create(Node);
+            stream.consume();
+            var rhs = try add(p);
+            rel_node.from_binary(NodeKind.Lt, rhs, lhs, stream_top);
+            lhs = rel_node;
+        } else if (stream_top.equal(&GTE)) {
+            var rel_node = try p.alloc.create(Node);
+            stream.consume();
+            var rhs = try add(p);
+            rel_node.from_binary(NodeKind.Lte, rhs, lhs, stream_top);
+            lhs = rel_node;
+        } else {
+            loop = false;
+        }
+    }
+    return lhs;
+}
+
+fn equality(p: *ParseContext) !*Node {
+    var lhs = try relational(p);
+    var loop = true;
+    var stream = p.stream;
+    while (loop) {
+        var stream_top = stream.top();
+        if (stream_top.equal(&EQEQ) or stream_top.equal(&NOTEQ)) {
+            var op = if (stream_top.equal(&EQEQ)) NodeKind.Eq else NodeKind.Neq;
+            var op_tok = stream_top;
+            stream.consume();
+            var rhs = try relational(p);
+            var rel_node = try p.alloc.create(Node);
+            rel_node.from_binary(op, lhs, rhs, op_tok);
+            lhs = rel_node;
+        } else {
+            loop = false;
+        }
+    }
+    return lhs;
+}
+
+fn assign(p: *ParseContext) !*Node {
+    var lhs = try equality(p);
+    var stream = p.stream;
+    var top = stream.top();
+    if (top.equal(&ASSIGN)) {
+        stream.consume();
+        var rhs = try assign(p);
+        var assign_node = try p.alloc.create(Node);
+        assign_node.from_binary(NodeKind.Assign, lhs, rhs, top);
+        return assign_node;
+    }
+    return lhs;
+}
+
+fn expr(p: *ParseContext) !*Node {
+    return assign(p);
+}
+
 // expr-stmt = expr? ;
 fn expr_statement(p: *ParseContext) !*Node {
     var s = p.stream;
@@ -502,6 +490,30 @@ fn stmt(p: *ParseContext) !*Node {
         return expr_statement(p);
     }
 }
+
+// stmt* }
+fn compound_statement(p: *ParseContext) anyerror!*Node {
+    var first_stmt: ?*Node = null;
+    var it = first_stmt;
+    var stream = p.stream;
+    var s_top = stream.top();
+    while (stream.top().equal(&RBRACE) == false) {
+        var statement = try stmt(p);
+        add_type(p.alloc, statement);
+        if (first_stmt == null) {
+            first_stmt = statement;
+            it = statement;
+        } else {
+            it.?.next = statement;
+            it = statement;
+        }
+    }
+    var compound_stmt_node = try p.alloc.create(Node);
+    compound_stmt_node.from_block(first_stmt, s_top);
+    stream.consume();
+    return compound_stmt_node;
+}
+
 pub fn parse(s: *Stream, alloc: Allocator) !*Function {
     var parse_context = ParseContext{ .stream = s, .alloc = alloc, .locals = ObjList.init(alloc) };
     //FIXME: When do we deinit locals ?
