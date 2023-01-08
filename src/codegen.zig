@@ -535,15 +535,15 @@ const fn_prologue =
     \\.global _start
     \\.align 2
     \\_start:
-    \\ str x29, [sp, -16]
     \\ sub sp, sp, #16
+    \\ stp x29, x30, [sp]
     \\ mov x29, sp
 ;
 // each fn's body will sub sp based on the # of local vars after `fn_prologue`
 // similarly each fn will add sp to its original location based on the # of local vars after `fn_epilogue`
 const fn_epilogue =
     \\ return_label:
-    \\ ldr x29, [x29]
+    \\ ldp x29, x30, [x29]
     \\ add sp, sp, 16
     \\ ret
 ;
