@@ -77,16 +77,16 @@ pub const Token = union(TokenKind) {
     fn format(self: Self, comptime _: []const u8, _: std.fmt.FormatOptions, out_stream: anytype) !void {
         switch (self) {
             TokenKind.num => |v| {
-                try std.fmt.format(out_stream, "TokenKind.num {}\n", .{v.val});
+                try std.fmt.format(out_stream, "TokenKind.num :D {}\n", .{v.val});
             },
             TokenKind.punct => |v| {
-                try std.fmt.format(out_stream, "TokenKind.punct {s}\n", .{v.ptr});
+                try std.fmt.format(out_stream, "TokenKind.punct :D {s}\n", .{v.ptr});
             },
             TokenKind.eof => {
-                try std.fmt.format(out_stream, "TokenKind.eof \n", .{});
+                try std.fmt.format(out_stream, "TokenKind.eof :D \n", .{});
             },
             TokenKind.ident => |v| {
-                try std.fmt.format(out_stream, "TokenKind.punct {s}\n", .{v.ptr});
+                try std.fmt.format(out_stream, "TokenKind.punct :D {s}\n", .{v.ptr});
             },
         }
     }
