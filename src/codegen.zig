@@ -21,10 +21,11 @@ pub const GT = Token{ .punct = .{ .ptr = span(all_valid_chars[13..14]) } };
 pub const GTE = Token{ .punct = .{ .ptr = span(all_valid_chars[14..16]) } };
 pub const SEMICOLON = Token{ .punct = .{ .ptr = span(all_valid_chars[16..17]) } };
 pub const ASSIGN = Token{ .punct = .{ .ptr = span(all_valid_chars[17..18]) } };
+pub const RETURN = Token{ .keyword = .{ .ptr = span("return") } };
 // ** AST Generation ** //
 
 // Code emitter
-const NodeKind = enum { Add, Sub, Mul, Div, Unary, Num, Eq, Neq, Lt, Lte, ExprStmt, Assign, Var };
+const NodeKind = enum { Add, Sub, Mul, Div, Unary, Num, Eq, Neq, Lt, Lte, ExprStmt, Assign, Var, Ret };
 pub const Node = struct {
     const Self = @This();
     kind: NodeKind,
@@ -42,8 +43,8 @@ pub const Node = struct {
     fn from_num(self: *Self, num: i32) void {
         self.* = .{ .kind = NodeKind.Num, .val = num };
     }
-    fn from_unary(self: *Self, lhs: ?*Node) void {
-        self.* = .{ .kind = NodeKind.Unary, .lhs = lhs };
+    fn from_unary(self: *Self, kind: NodeKind, lhs: ?*Node) void {
+        self.* = .{ .kind = kind, .lhs = lhs };
     }
     fn from_expr_stmt(self: *Self, lhs: ?*Node) void {
         self.* = .{ .kind = NodeKind.ExprStmt, .lhs = lhs };
@@ -63,7 +64,7 @@ fn unary(p: *ParseContext) !*Node {
         stream.consume();
         var lhs = try unary(p);
         var unary_node = try p.alloc.create(Node);
-        unary_node.from_unary(lhs);
+        unary_node.from_unary(NodeKind.Unary, lhs);
         return unary_node;
     }
     return primary(p);
@@ -220,10 +221,20 @@ fn expr_statement(p: *ParseContext) !*Node {
     s.skip(&SEMICOLON);
     return expr_node;
 }
-// Do not not know why we have one xtra layer of
-// indirection to expr_statement
+// stmt = "return" expr ";"
+//      | expr-stmt
 fn stmt(p: *ParseContext) !*Node {
-    return expr_statement(p);
+    var stream = p.stream;
+    if (stream.top().equal(&RETURN)) {
+        stream.consume();
+        var return_expr = try expr(p);
+        stream.skip(&SEMICOLON);
+        var return_node = try p.alloc.create(Node);
+        return_node.from_unary(NodeKind.Ret, return_expr);
+        return return_node;
+    } else {
+        return expr_statement(p);
+    }
 }
 pub fn parse(s: *Stream, alloc: Allocator) !*Function {
     var root_node: ?*Node = null;
@@ -261,6 +272,7 @@ const fn_prologue =
 // each fn's body will sub sp based on the # of local vars after `fn_prologue`
 // similarly each fn will add sp to its original location based on the # of local vars after `fn_epilogue`
 const fn_epilogue =
+    \\ return_label:
     \\ ldr x29, [x29]
     \\ add sp, sp, 16
     \\ ret
@@ -355,11 +367,21 @@ pub fn gen_expr(node: *Node) !void {
 }
 
 fn gen_stmt(n: *Node) !void {
-    if (n.kind == NodeKind.ExprStmt) {
-        try gen_expr(n.lhs.?);
-        return;
+    switch (n.kind) {
+        NodeKind.ExprStmt => {
+            try gen_expr(n.lhs.?);
+            return;
+        },
+        NodeKind.Ret => {
+            try gen_expr(n.lhs.?);
+            var stdout_writer = stdout.writer();
+            try stdout_writer.print("b return_label\n", .{});
+            return;
+        },
+        else => {
+            panic("Invalid node {?}\n", .{n});
+        },
     }
-    panic("Invalid node {any}", .{n});
 }
 pub fn codegen(f: *Function) !void {
     assign_lvar_offsets(f);
