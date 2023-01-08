@@ -37,28 +37,7 @@ pub const RETURN = Token{ .keyword = .{ .ptr = span("return") } };
 // For and while use the same kind
 // but in `while`, we disregard `inc`
 const NodeKind = enum { Add, Sub, Mul, Div, Unary, Num, Eq, Neq, Lt, Lte, ExprStmt, Assign, Var, Ret, Block, If, For };
-pub const Unionode = union(NodeKind) {
-    const Self = @This();
-    const binary_struct = struct { lhs: ?*Self = null, rhs: ?*Self = null };
-    const unary_struct = struct { lhs: *Self };
-    Add: binary_struct,
-    Sub: binary_struct,
-    Mul: binary_struct,
-    Div: binary_struct,
-    Unary: unary_struct,
-    Num: struct { val: i32 },
-    Eq: binary_struct,
-    Neq: binary_struct,
-    Lt: binary_struct,
-    Lte: binary_struct,
-    ExprStmt: unary_struct,
-    Assign: binary_struct,
-    Var: struct { variable: ?*Obj = null },
-    Ret: unary_struct,
-    Block: struct { body: ?*Node },
-    If: struct { cond: ?*Node, then: ?*Node, els: ?*Node },
-    For: struct { int: ?*Node, cond: ?*Node, inc: ?*Node, then: ?*Node },
-};
+
 // A variable in our C code
 const Obj = struct {
     name: []u8,
