@@ -4,7 +4,7 @@ const span = std.mem.span;
 const Allocator = std.mem.Allocator;
 const page_alloc = std.heap.page_allocator;
 const stdout = std.io.getStdOut();
-const all_valid_chars = "()/*+-";
+const all_valid_chars = "()/*+-==!=<<=>>=";
 //This should be const, but since Token.eql() takes a *Token , and &LEFT_PAREN
 //'s type is *const Token, the compiler is complaining all the time ! (Grrr)
 const LEFT_PAREN = Token{ .punct = .{ .ptr = span(all_valid_chars[0..1]) } };
@@ -13,6 +13,12 @@ const DIV = Token{ .punct = .{ .ptr = span(all_valid_chars[2..3]) } };
 const MUL = Token{ .punct = .{ .ptr = span(all_valid_chars[3..4]) } };
 const PLUS = Token{ .punct = .{ .ptr = span(all_valid_chars[4..5]) } };
 const MINUS = Token{ .punct = .{ .ptr = span(all_valid_chars[5..6]) } };
+const EQEQ = Token{ .punct = .{ .ptr = span(all_valid_chars[6..8]) } };
+const NOTEQ = Token{ .punct = .{ .ptr = span(all_valid_chars[8..10]) } };
+const LT = Token{ .punct = .{ .ptr = span(all_valid_chars[10..11]) } };
+const LTE = Token{ .punct = .{ .ptr = span(all_valid_chars[11..13]) } };
+const GT = Token{ .punct = .{ .ptr = span(all_valid_chars[13..14]) } };
+const GTE = Token{ .punct = .{ .ptr = span(all_valid_chars[14..16]) } };
 // In ARM assembler default alignment is a 4-byte boundart
 // .align takes argument `exponent` and alignment = 2 power exponent
 const program_header =
@@ -146,9 +152,10 @@ fn tokenize(stream_p: *[*:0]u8, list: *TokenList) !void {
             //notice that we are modifying stream here
             var number = strtol(&stream);
             try list.append(Token{ .num = .{ .val = number.? } });
-        } else if (ascii.isPunct(stream[0])) {
-            try list.append(Token{ .punct = .{ .ptr = stream[0..1] } });
-            stream += 1;
+        } else if (readPunct(span(stream)) > 0) {
+            var punct_len = readPunct(span(stream));
+            try list.append(Token{ .punct = .{ .ptr = stream[0..punct_len] } });
+            stream += punct_len;
         } else {
             panic("Invalid token {c} from {s}\n", .{ stream[0], stream });
         }
@@ -216,7 +223,7 @@ fn strtol(yp: *[*:0]const u8) ?i32 {
 }
 
 // Code emitter
-const NodeKind = enum { Add, Sub, Mul, Div, Unary, Num };
+const NodeKind = enum { Add, Sub, Mul, Div, Unary, Num, Eq, Neq, Lt, Lte };
 const Node = struct {
     const Self = @This();
     kind: NodeKind,
@@ -237,19 +244,19 @@ const Node = struct {
     }
 };
 
-fn unary(s: *Stream, alloc: Allocator) !*Node {
-    var stream_top = s.top();
+fn unary(stream: *Stream, alloc: Allocator) !*Node {
+    var stream_top = stream.top();
     if (stream_top.equal(&PLUS)) {
-        s.consume();
-        return unary(s, alloc);
+        stream.consume();
+        return unary(stream, alloc);
     } else if (stream_top.equal(&MINUS)) {
-        s.consume();
-        var lhs = try unary(s, alloc);
+        stream.consume();
+        var lhs = try unary(stream, alloc);
         var unary_node = try alloc.create(Node);
         unary_node.from_unary(lhs);
         return unary_node;
     }
-    return primary(s, alloc);
+    return primary(stream, alloc);
 }
 fn mul(s: *Stream, alloc: Allocator) !*Node {
     var lhs = try unary(s, alloc);
@@ -269,7 +276,11 @@ fn mul(s: *Stream, alloc: Allocator) !*Node {
     }
     return lhs;
 }
+
 fn expr(s: *Stream, alloc: Allocator) !*Node {
+    return equality(s, alloc);
+}
+fn add(s: *Stream, alloc: Allocator) !*Node {
     var lhs = try mul(s, alloc);
     var loop = true;
     while (loop == true) {
@@ -281,6 +292,61 @@ fn expr(s: *Stream, alloc: Allocator) !*Node {
             var expr_node = try alloc.create(Node);
             expr_node.from_binary(op, lhs, rhs);
             lhs = expr_node;
+        } else {
+            loop = false;
+        }
+    }
+    return lhs;
+}
+fn equality(stream: *Stream, alloc: Allocator) !*Node {
+    var lhs = try relational(stream, alloc);
+    var loop = true;
+    while (loop) {
+        var stream_top = stream.top();
+        if (stream_top.equal(&EQEQ) or stream_top.equal(&NOTEQ)) {
+            var op = if (stream_top.equal(&EQEQ)) NodeKind.Eq else NodeKind.Neq;
+            stream.consume();
+            var rhs = try relational(stream, alloc);
+            var rel_node = try alloc.create(Node);
+            rel_node.from_binary(op, lhs, rhs);
+            lhs = rel_node;
+        } else {
+            loop = false;
+        }
+    }
+    return lhs;
+}
+fn relational(stream: *Stream, alloc: Allocator) !*Node {
+    var lhs = try add(stream, alloc);
+    var loop = true;
+    while (loop) {
+        var stream_top = stream.top();
+        if (stream_top.equal(&LT)) {
+            var rel_node = try alloc.create(Node);
+            stream.consume();
+            var rhs = try add(stream, alloc);
+            rel_node.from_binary(NodeKind.Lt, lhs, rhs);
+            lhs = rel_node;
+        } else if (stream_top.equal(&LTE)) {
+            var rel_node = try alloc.create(Node);
+            stream.consume();
+            var rhs = try add(stream, alloc);
+            rel_node.from_binary(NodeKind.Lte, lhs, rhs);
+            lhs = rel_node;
+            // Optimization, we need not have a NodeKind.Gte
+            // we can just switch lhs and rhs with the same Lt, Lte ops
+        } else if (stream_top.equal(&GT)) {
+            var rel_node = try alloc.create(Node);
+            stream.consume();
+            var rhs = try add(stream, alloc);
+            rel_node.from_binary(NodeKind.Lt, rhs, lhs);
+            lhs = rel_node;
+        } else if (stream_top.equal(&GTE)) {
+            var rel_node = try alloc.create(Node);
+            stream.consume();
+            var rhs = try add(stream, alloc);
+            rel_node.from_binary(NodeKind.Lte, rhs, lhs);
+            lhs = rel_node;
         } else {
             loop = false;
         }
@@ -308,6 +374,7 @@ fn primary(s: *Stream, alloc: Allocator) anyerror!*Node {
     }
 }
 
+// ** Code-Generation ** //
 fn push() !void {
     try stdout.writer().print("str X0, [sp, -16]\n", .{});
     try stdout.writer().print("sub sp, sp, #16\n", .{});
@@ -342,15 +409,49 @@ fn gen_expr(node: *Node) !void {
             NodeKind.Sub => {
                 try stdout.writer().print("sub x0, x0, x1\n", .{});
             },
+            // This should be smul x0, w0, w1
             NodeKind.Mul => {
                 try stdout.writer().print("mul x0, x0, x1\n", .{});
             },
             NodeKind.Div => {
                 try stdout.writer().print("sdiv x0, x0, x1\n", .{});
             },
+            NodeKind.Eq => {
+                try stdout.writer().print("cmp x0, x1\n ", .{});
+                try stdout.writer().print("cset x0, eq\n ", .{});
+            },
+            NodeKind.Neq => {
+                try stdout.writer().print("cmp x0, x1\n ", .{});
+                try stdout.writer().print("cset x0, ne\n ", .{});
+            },
+            NodeKind.Lt => {
+                try stdout.writer().print("cmp x0, x1\n ", .{});
+                try stdout.writer().print("cset x0, lt\n ", .{});
+            },
+            NodeKind.Lte => {
+                try stdout.writer().print("cmp x0, x1\n ", .{});
+                try stdout.writer().print("cset x0, le\n ", .{});
+            },
             else => {
                 panic("we shouldn't be here at all", .{});
             },
         }
+    }
+}
+
+fn starts_with(q: []const u8, p: []const u8) bool {
+    return std.mem.startsWith(u8, q, p);
+}
+
+fn readPunct(s: []const u8) usize {
+    if (starts_with(s, span("==")) or starts_with(s, span("!=")) or
+        starts_with(s, span("<=")) or starts_with(s, span(">=")))
+    {
+        return 2;
+    }
+    if (ascii.isPunct(s[0])) {
+        return 1;
+    } else {
+        return 0;
     }
 }
