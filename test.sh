@@ -1,12 +1,14 @@
+set -euo pipefail
 #!/bin/bash
 zig build || exit
+gcc -c tmp2.c
 assert() {
   expected="$1"
   input="$2"
 
   ./zig-out/bin/chibicc-zig "$input" > tmp.s || exit
   as -arch arm64 -o tmp.asm tmp.s
-  ld -o tmp tmp.asm -lSystem -syslibroot `xcrun -sdk macosx --show-sdk-path` -e _start -arch arm64
+  ld -o tmp tmp.asm tmp2.o -lSystem -syslibroot `xcrun -sdk macosx --show-sdk-path` -e _start -arch arm64
   ./tmp
   actual="$?"
 
@@ -18,6 +20,7 @@ assert() {
   fi
 }
 
+assert 3 '{ return ret3(); }'
 assert 42 '{ return 42; }'
 assert 21 '{ return 5+20-4; }'
 assert 41 '{ return  12 + 34 - 5 ; }'
@@ -92,6 +95,6 @@ assert 7 '{ int x=3; int y=5; *(&y-2+1)=7; return x; }'
 assert 5 '{ int x=3; return (&x+2)-&x+3; }'
 assert 8 '{ int x, y; x=3; y=5; return x+y; }'
 assert 8 '{ int x=3, y=5; return x+y; }'
-
+assert 5 '{ return ret5(); }'
 echo OK 
 

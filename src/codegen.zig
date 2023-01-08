@@ -41,7 +41,7 @@ pub const INT = Token{ .keyword = .{ .ptr = span("int") } };
 // Code emitter
 // For and while use the same kind
 // but in `while`, we disregard `inc`
-const NodeKind = enum { Add, Sub, Mul, Div, Unary, Num, Eq, Neq, Lt, Lte, ExprStmt, Assign, Var, Ret, Block, If, For, Addr, Deref };
+const NodeKind = enum { Add, Sub, Mul, Div, Unary, Num, Eq, Neq, Lt, Lte, ExprStmt, Assign, Var, Ret, Block, If, For, Addr, Deref, Funcall };
 
 const TypeKind = enum { Int, Ptr };
 // Type information about variables
@@ -86,6 +86,7 @@ pub const Node = struct {
     val: i32 = 0, // Used when Kind = Num
     variable: ?*Obj = null, // Used when Kind = var
     tok: ?*const Token = null, // The token in the parse stream that was
+    fn_name: []const u8 = span(""), // Use when Kind = Funcall
     //used as a basis to create this node
     // self is a pointer into global heap region or a fn-local heap
     pub fn from_binary(alloc: Allocator, kind: NodeKind, lhs: ?*Node, rhs: ?*Node, tok: ?*Token) !*Self {
@@ -131,6 +132,11 @@ pub const Node = struct {
         self.* = .{ .kind = NodeKind.For, .init = init, .cond = cond, .inc = inc, .then = then, .tok = tok };
         return self;
     }
+    pub fn from_fncall(alloc: Allocator, fn_name: []const u8, tok: ?*Token) !*Self {
+        var self = try alloc.create(Self);
+        self.* = .{ .kind = NodeKind.Funcall, .fn_name = try alloc.dupe(u8, fn_name), .tok = tok };
+        return self;
+    }
 
     pub fn format(self: Self, comptime _: []const u8, _: std.fmt.FormatOptions, out_stream: anytype) !void {
         switch (self.kind) {
@@ -161,6 +167,9 @@ pub const Node = struct {
             },
             NodeKind.For => {
                 try std.fmt.format(out_stream, "ForNode starting at {?} with init {?}\ncond {?}\n then {?} else{?}\n", .{ self.tok, self.init, self.cond, self.then, self.els });
+            },
+            NodeKind.Funcall => {
+                try std.fmt.format(out_stream, "Funcall Node with name {s} \n", .{self.fn_name});
             },
         }
     }
@@ -242,6 +251,13 @@ fn primary(p: *ParseContext) anyerror!*Node {
     }
     switch (top_token.*) {
         TokenKind.ident => |v| {
+            if (s.next().?.equal(&LPAREN)) { // fn call
+                var fncall_node = try Node.from_fncall(p.alloc, v.ptr, top_token);
+                s.advance(); //consume fn name
+                s.advance(); // consume (
+                s.skip(&RPAREN);
+                return fncall_node;
+            }
             var variable: *Obj = undefined;
             if (find_local_var(v.ptr, p.locals)) |local_var| {
                 variable = local_var;
@@ -585,6 +601,15 @@ pub fn gen_expr(node: *Node) anyerror!void {
         try gen_expr(node.rhs.?); // x0 now has value
         try pop(span("x1")); // x1 has addr of variable
         try stdout.writer().print("str X0, [X1]\n", .{});
+    } else if (node.kind == NodeKind.Funcall) {
+        try stdout.writer().print("mov x0, #0\n", .{});
+        // I do not know how to solve this nicely yet, but
+        // clang seems to emit symbols with a leading `_` for C fns
+        // eg. if you have a fn int badaxe() in a C file that is compiled into
+        // a relocatable object, the object file will have the symbol _badaxe
+        // Until we figure out how we can fix it , lets just prefix all
+        // function names with an `_`
+        try stdout.writer().print("bl _{s}\n", .{node.fn_name});
     } else {
         // Idea, gen_expr, returns which register the end value of that expr is in
         // we can then use this as an input into the subsequent Add, Sub, Mul, Div
