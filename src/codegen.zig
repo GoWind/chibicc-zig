@@ -5,7 +5,7 @@ const Stream = tokenizer.Stream;
 const Allocator = std.mem.Allocator;
 const span = std.mem.span;
 const panic = std.debug.panic;
-const all_valid_chars = "()/*+-==!=<<=>>=;={}ifelse()";
+const all_valid_chars = "()/*+-==!=<<=>>=;={}ifelse()for";
 const stdout = std.io.getStdOut();
 pub const LEFT_PAREN = Token{ .punct = .{ .ptr = span(all_valid_chars[0..1]) } };
 pub const RIGHT_PAREN = Token{ .punct = .{ .ptr = span(all_valid_chars[1..2]) } };
@@ -27,12 +27,13 @@ pub const IF = Token{ .keyword = .{ .ptr = span(all_valid_chars[20..22]) } };
 pub const ELSE = Token{ .keyword = .{ .ptr = span(all_valid_chars[22..26]) } };
 pub const LPAREN = Token{ .punct = .{ .ptr = span(all_valid_chars[26..27]) } };
 pub const RPAREN = Token{ .punct = .{ .ptr = span(all_valid_chars[27..28]) } };
+pub const FOR = Token{ .keyword = .{ .ptr = span(all_valid_chars[28..31]) } };
 
 pub const RETURN = Token{ .keyword = .{ .ptr = span("return") } };
 // ** AST Generation ** //
 
 // Code emitter
-const NodeKind = enum { Add, Sub, Mul, Div, Unary, Num, Eq, Neq, Lt, Lte, ExprStmt, Assign, Var, Ret, Block, If };
+const NodeKind = enum { Add, Sub, Mul, Div, Unary, Num, Eq, Neq, Lt, Lte, ExprStmt, Assign, Var, Ret, Block, If, For };
 pub const Node = struct {
     const Self = @This();
     kind: NodeKind,
@@ -40,10 +41,14 @@ pub const Node = struct {
     lhs: ?*Node = null,
     rhs: ?*Node = null,
     body: ?*Node = null, // For Blocks
-    // If else blocks
+    // If else blocks, then is also used with `for`
     cond: ?*Node = null,
     then: ?*Node = null,
     els: ?*Node = null,
+
+    // for loop
+    init: ?*Node = null,
+    inc: ?*Node = null,
     val: i32 = 0, // Used when Kind = Num
     variable: ?*Obj = null, // Used when Kind = var
 
@@ -70,6 +75,10 @@ pub const Node = struct {
 
     fn from_if_stmt(self: *Self, cond: ?*Node, then: ?*Node, els: ?*Node) void {
         self.* = .{ .kind = NodeKind.If, .cond = cond, .then = then, .els = els };
+    }
+
+    fn from_for(self: *Self, init: ?*Node, cond: ?*Node, inc: ?*Node, then: ?*Node) void {
+        self.* = .{ .kind = NodeKind.For, .init = init, .cond = cond, .inc = inc, .then = then };
     }
 };
 
@@ -268,6 +277,7 @@ fn expr_statement(p: *ParseContext) !*Node {
 }
 // stmt = "return" expr ";"
 //      | "if" "(" expr ")" stmt ("else" stmt)?
+//      | "for" "(" expr-stmt expr? ; expr? ")" stmt
 //      | "{" compound-stmt
 //      | expr-stmt
 fn stmt(p: *ParseContext) !*Node {
@@ -295,6 +305,24 @@ fn stmt(p: *ParseContext) !*Node {
             if_node.from_if_stmt(if_condition, then_stmt, null);
         }
         return if_node;
+    } else if (stream_top.equal(&FOR)) {
+        stream.consume();
+        stream.skip(&LPAREN);
+        var for_init = try expr_statement(p);
+        var for_cond: ?*Node = null;
+        var for_inc: ?*Node = null;
+        if (stream.top().equal(&SEMICOLON) == false) {
+            for_cond = try expr(p);
+        }
+        stream.skip(&SEMICOLON);
+        if (stream.top().equal(&RPAREN) == false) {
+            for_inc = try expr(p);
+        }
+        stream.skip(&RPAREN);
+        var for_then = try stmt(p);
+        var for_node = try p.alloc.create(Node);
+        for_node.from_for(for_init, for_cond, for_inc, for_then);
+        return for_node;
     } else if (stream_top.equal(&LBRACE)) {
         stream.consume();
         return compound_statement(p);
@@ -442,6 +470,22 @@ fn gen_stmt(n: *Node) !void {
                 try gen_stmt(else_stmt);
             }
             try stdout_writer.print("end_label_{}:\n", .{branch_id});
+        },
+        NodeKind.For => {
+            var branch_id = update_branch_count();
+            try gen_stmt(n.init.?);
+            try stdout_writer.print("for_label{}:\n", .{branch_id});
+            if (n.cond) |for_cond| {
+                try gen_expr(for_cond);
+                try stdout_writer.print("cmp x0, #0\n", .{});
+                try stdout_writer.print("b.eq for_end_label{}\n", .{branch_id});
+            }
+            try gen_stmt(n.then.?);
+            if (n.inc) |inc| {
+                try gen_expr(inc);
+            }
+            try stdout_writer.print("b for_label{}\n", .{branch_id});
+            try stdout_writer.print("for_end_label{}:\n", .{branch_id});
         },
         NodeKind.Block => {
             var maybe_it = n.body;
