@@ -216,7 +216,7 @@ fn strtol(yp: *[*:0]const u8) ?i32 {
 }
 
 // Code emitter
-const NodeKind = enum { Add, Sub, Mul, Div, Num };
+const NodeKind = enum { Add, Sub, Mul, Div, Unary, Num };
 const Node = struct {
     const Self = @This();
     kind: NodeKind,
@@ -232,17 +232,34 @@ const Node = struct {
     fn from_num(self: *Self, num: i32) void {
         self.* = .{ .kind = NodeKind.Num, .val = num };
     }
+    fn from_unary(self: *Self, lhs: ?*Node) void {
+        self.* = .{ .kind = NodeKind.Unary, .lhs = lhs };
+    }
 };
 
+fn unary(s: *Stream, alloc: Allocator) !*Node {
+    var stream_top = s.top();
+    if (stream_top.equal(&PLUS)) {
+        s.consume();
+        return unary(s, alloc);
+    } else if (stream_top.equal(&MINUS)) {
+        s.consume();
+        var lhs = try unary(s, alloc);
+        var unary_node = try alloc.create(Node);
+        unary_node.from_unary(lhs);
+        return unary_node;
+    }
+    return primary(s, alloc);
+}
 fn mul(s: *Stream, alloc: Allocator) !*Node {
-    var lhs = try primary(s, alloc);
+    var lhs = try unary(s, alloc);
     var loop = true;
     while (loop == true) {
         var stream_top = s.top();
         if ((stream_top.equal(&MUL) == true) or (stream_top.equal(&DIV) == true)) {
             var op = if (stream_top.equal(&MUL)) NodeKind.Mul else NodeKind.Div;
             s.consume();
-            var rhs = try primary(s, alloc);
+            var rhs = try unary(s, alloc);
             var expr_node = try alloc.create(Node);
             expr_node.from_binary(op, lhs, rhs);
             lhs = expr_node;
@@ -303,15 +320,21 @@ fn pop(reg: []const u8) !void {
 fn gen_expr(node: *Node) !void {
     if (node.kind == NodeKind.Num) {
         try stdout.writer().print("mov X0, {}\n", .{node.val});
+    } else if (node.kind == NodeKind.Unary) {
+        try gen_expr(node.lhs.?);
+        try stdout.writer().print("neg x0, x0\n", .{});
     } else {
-        // This is very inefficient for now, as aarch64 has 18 general
-        // purpose registers and we are using only 2 of them
-        // we need a way to figure out which regs are free and use them
-        // instead of pushing and popping to the stack
+        // idea, gen_expr, returns which register the end value of that expr is in
+        // we can then use this as an input into the subsequent Add, Sub, Mul, Div
+        // instructions, instead of pushing and popping from stack
         try gen_expr(node.rhs.?);
         try push();
         try gen_expr(node.lhs.?);
         try pop(span("x1"));
+        // Idea: Add should be able to take a reg (x0..x18) as input and generate
+        // instructions as per that
+        // for each instruction, we keep track of which x register is free and then emit instructions
+        // into that reg and then cross out that register as occupied
         switch (node.kind) {
             NodeKind.Add => {
                 try stdout.writer().print("add x0, x0, x1\n", .{});
@@ -323,7 +346,7 @@ fn gen_expr(node: *Node) !void {
                 try stdout.writer().print("mul x0, x0, x1\n", .{});
             },
             NodeKind.Div => {
-                try stdout.writer().print("div x0, x0, x1\n", .{});
+                try stdout.writer().print("sdiv x0, x0, x1\n", .{});
             },
             else => {
                 panic("we shouldn't be here at all", .{});
