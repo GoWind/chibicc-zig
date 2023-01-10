@@ -43,10 +43,31 @@ pub const INT = Token{ .keyword = .{ .ptr = span("int") } };
 // but in `while`, we disregard `inc`
 const NodeKind = enum { Add, Sub, Mul, Div, Unary, Num, Eq, Neq, Lt, Lte, ExprStmt, Assign, Var, Ret, Block, If, For, Addr, Deref, Funcall };
 
-const TypeKind = enum { Int, Ptr };
+const TypeKind = enum { Int, Ptr, Func };
 // Type information about variables
-const Type = struct { kind: TypeKind, base: ?*const Type, tok: *const Token };
+const Type = struct {
+    kind: TypeKind,
+    base: ?*const Type = null,
+    tok: *const Token,
+    return_type: ?*const Type = null,
+    const Self = @This();
+    pub fn func_type(alloc: Allocator, return_type: *const Self) !*Type {
+        var fn_type = try alloc.create(Self);
+        fn_type.return_type = return_type;
+        return fn_type;
+    }
+    //TODO: This can be memoized
+    fn pointer_to(alloc: Allocator, base: *const Type, tok: *const Token) !*Type {
+        var derived = try alloc.create(Type);
+        derived.kind = TypeKind.Ptr;
+        derived.base = base;
+        derived.tok = tok;
+        return derived;
+    }
+};
 
+// this should be a const, but that makes the pointer to this a *const Type and
+// it is very annoying to change aftewards, so guess I will deal with this later
 var IntBaseType = Type{ .kind = TypeKind.Int, .base = null, .tok = &INT };
 
 // A variable in our C code
@@ -88,6 +109,7 @@ pub const Node = struct {
     tok: ?*const Token = null, // The token in the parse stream that was
     fn_name: []const u8 = span(""), // Used when Kind = Funcall
     fn_args: NodeList = undefined, //  Used when Kind = Funcall
+    return_type: ?*Type = null,
     //used as a basis to create this node
     // self is a pointer into global heap region or a fn-local heap
     pub fn from_binary(alloc: Allocator, kind: NodeKind, lhs: ?*Node, rhs: ?*Node, tok: ?*Token) !*Self {
@@ -530,26 +552,33 @@ fn compound_statement(p: *ParseContext) anyerror!*Node {
     return compound_stmt_node;
 }
 
-pub fn parse(s: *Stream, alloc: Allocator) !*Function {
-    var parse_context = ParseContext{ .stream = s, .alloc = alloc, .locals = ObjList.init(alloc) };
-    //FIXME: When do we deinit locals ?
-    s.skip(&LBRACE);
-    var program_body = try compound_statement(&parse_context);
+pub fn function(p: *ParseContext) !Function {
+    var typ = declspec(p);
+    typ = try declarator(p, typ);
 
-    var f = try alloc.create(Function);
-    f.fnbody = program_body;
-    f.locals = parse_context.locals;
-    f.stack_size = 0; //FIXME: What should this be ?
+    p.stream.skip(&LBRACE);
+    var fn_statements = try compound_statement(p);
+
+    var f = Function{ .stack_size = 0, .name = Token.get_ident(typ.tok), .fnbody = fn_statements, .locals = p.locals };
     return f;
+}
+pub fn parse(s: *Stream, alloc: Allocator) !std.ArrayList(Function) {
+    var parse_context = ParseContext{ .stream = s, .alloc = alloc, .locals = ObjList.init(alloc) };
+    const functions_list = std.ArrayList(Function);
+    var functions = functions_list.init(alloc);
+    while (!s.is_eof()) {
+        var next_fn = try function(&parse_context);
+        try functions.append(next_fn);
+        //reset list of local variables for each function
+        parse_context.locals = ObjList.init(alloc);
+    }
+    return functions;
 }
 
 // In ARM assembler default alignment is a 4-byte boundart
 // .align takes argument `exponent` and alignment = 2 power exponent
 
 const fn_prologue =
-    \\.global _start
-    \\.align 2
-    \\_start:
     \\ sub sp, sp, #16
     \\ stp x29, x30, [sp]
     \\ mov x29, sp
@@ -557,14 +586,13 @@ const fn_prologue =
 // each fn's body will sub sp based on the # of local vars after `fn_prologue`
 // similarly each fn will add sp to its original location based on the # of local vars after `fn_epilogue`
 const fn_epilogue =
-    \\ return_label:
     \\ ldp x29, x30, [x29]
     \\ add sp, sp, 16
     \\ ret
 ;
 // At the end of this, X0 will have the addr
 // of the variable being loaded
-fn gen_addr(node: *Node) !void {
+fn gen_addr(node: *Node, ctx: *CodegenContext) !void {
     switch (node.kind) {
         NodeKind.Var => {
             var offset = node.variable.?.offset;
@@ -574,7 +602,7 @@ fn gen_addr(node: *Node) !void {
         // I don't know how we can pass a node of type `deref` to gen_addr yet.
         // Feels wrong, but maybe, it is for something like **x or ***x and so on ?
         NodeKind.Deref => {
-            try gen_expr(node.lhs.?);
+            try gen_expr(node.lhs.?, ctx);
         },
         else => {
             panic("Not an lvalue {?}", .{node});
@@ -595,32 +623,32 @@ fn pop(reg: []const u8) !void {
     try stdout.writer().print("add sp, sp, #16\n", .{});
 }
 // Code generation
-pub fn gen_expr(node: *Node) anyerror!void {
+pub fn gen_expr(node: *Node, ctx: *CodegenContext) anyerror!void {
     if (node.kind == NodeKind.Num) {
         try stdout.writer().print(";; loading immediate {} at\n", .{node.val});
         try stdout.writer().print("mov X0, {}\n", .{node.val});
     } else if (node.kind == NodeKind.Var) {
-        try gen_addr(node); //x0 has address of variable
+        try gen_addr(node, ctx); //x0 has address of variable
         try stdout.writer().print("ldr x0, [x0]\n", .{}); // now load val of variable into x0
     } else if (node.kind == NodeKind.Addr) {
-        try gen_addr(node.lhs.?); // node should be something like a var whose address we can obtain
+        try gen_addr(node.lhs.?, ctx); // node should be something like a var whose address we can obtain
     } else if (node.kind == NodeKind.Deref) {
-        try gen_expr(node.lhs.?); // x0 now should have an address (from a variable ideally)
+        try gen_expr(node.lhs.?, ctx); // x0 now should have an address (from a variable ideally)
         try stdout.writer().print("ldr x0, [x0]\n", .{});
         //TODO: This should be neg, not Unary
     } else if (node.kind == NodeKind.Unary) {
-        try gen_expr(node.lhs.?);
+        try gen_expr(node.lhs.?, ctx);
         try stdout.writer().print("neg x0, x0\n", .{});
     } else if (node.kind == NodeKind.Assign) {
-        try gen_addr(node.lhs.?); //x0 has addr of variable
+        try gen_addr(node.lhs.?, ctx); //x0 has addr of variable
         try push(); //push x0 into stack
-        try gen_expr(node.rhs.?); // x0 now has value
+        try gen_expr(node.rhs.?, ctx); // x0 now has value
         try pop(span("x1")); // x1 has addr of variable
         try stdout.writer().print("str X0, [X1]\n", .{});
     } else if (node.kind == NodeKind.Funcall) {
         var args_len: usize = 0;
         for (node.fn_args.items) |arg| {
-            try gen_expr(arg);
+            try gen_expr(arg, ctx);
             try push();
             args_len += 1;
         }
@@ -641,9 +669,9 @@ pub fn gen_expr(node: *Node) anyerror!void {
         // Idea, gen_expr, returns which register the end value of that expr is in
         // we can then use this as an input into the subsequent Add, Sub, Mul, Div
         // instructions, instead of pushing and popping from stack
-        try gen_expr(node.rhs.?);
+        try gen_expr(node.rhs.?, ctx);
         try push();
-        try gen_expr(node.lhs.?);
+        try gen_expr(node.lhs.?, ctx);
         try pop(span("x1"));
         // Idea: Add should be able to take a reg (x0..x18) as input and generate
         // instructions as per that
@@ -686,40 +714,40 @@ pub fn gen_expr(node: *Node) anyerror!void {
     }
 }
 
-fn gen_stmt(n: *Node) !void {
+fn gen_stmt(n: *Node, ctx: *CodegenContext) !void {
     var stdout_writer = stdout.writer();
 
     switch (n.kind) {
         NodeKind.If => {
-            try gen_expr(n.cond.?);
+            try gen_expr(n.cond.?, ctx);
             // x0 is 1. when `cond` holds
             // if x0 is != 1, then cond => false hence
             // we jump to else
-            var branch_id = update_branch_count();
+            var branch_id = update_branch_count(ctx);
             try stdout_writer.print("cmp x0, #0\n", .{});
             try stdout_writer.print("b.eq else_label_{}\n", .{branch_id});
-            try gen_stmt(n.then.?);
+            try gen_stmt(n.then.?, ctx);
             try stdout_writer.print("b end_label_{}\n", .{branch_id});
             try stdout_writer.print("else_label_{}:\n", .{branch_id});
             if (n.els) |else_stmt| {
-                try gen_stmt(else_stmt);
+                try gen_stmt(else_stmt, ctx);
             }
             try stdout_writer.print("end_label_{}:\n", .{branch_id});
         },
         NodeKind.For => {
-            var branch_id = update_branch_count();
+            var branch_id = update_branch_count(ctx);
             if (n.init) |for_init| {
-                try gen_stmt(for_init);
+                try gen_stmt(for_init, ctx);
             }
             try stdout_writer.print("for_label{}:\n", .{branch_id});
             if (n.cond) |for_cond| {
-                try gen_expr(for_cond);
+                try gen_expr(for_cond, ctx);
                 try stdout_writer.print("cmp x0, #0\n", .{});
                 try stdout_writer.print("b.eq for_end_label{}\n", .{branch_id});
             }
-            try gen_stmt(n.then.?);
+            try gen_stmt(n.then.?, ctx);
             if (n.inc) |inc| {
-                try gen_expr(inc);
+                try gen_expr(inc, ctx);
             }
             try stdout_writer.print("b for_label{}\n", .{branch_id});
             try stdout_writer.print("for_end_label{}:\n", .{branch_id});
@@ -727,17 +755,17 @@ fn gen_stmt(n: *Node) !void {
         NodeKind.Block => {
             var maybe_it = n.body;
             while (maybe_it) |it| {
-                try gen_stmt(it);
+                try gen_stmt(it, ctx);
                 maybe_it = it.next;
             }
         },
         NodeKind.ExprStmt => {
-            try gen_expr(n.lhs.?);
+            try gen_expr(n.lhs.?, ctx);
             return;
         },
         NodeKind.Ret => {
-            try gen_expr(n.lhs.?);
-            try stdout_writer.print("b return_label\n", .{});
+            try gen_expr(n.lhs.?, ctx);
+            try stdout_writer.print("b return_label.{s}\n", .{ctx.current_func.name});
             return;
         },
         else => {
@@ -745,15 +773,28 @@ fn gen_stmt(n: *Node) !void {
         },
     }
 }
-pub fn codegen(f: *Function) !void {
-    assign_lvar_offsets(f);
+const CodegenContext = struct { current_func: *const Function, branch_count: u32 = 0 };
+pub fn codegen(functions: std.ArrayList(Function)) !void {
+    assign_lvar_offsets(functions);
     var stdout_writer = stdout.writer();
-    try stdout_writer.print("{s}\n", .{fn_prologue});
-    try stdout_writer.print(";; making space for local variables in stack\n", .{});
-    try stdout_writer.print("sub sp, sp, #{}\n", .{f.stack_size});
-    try gen_stmt(f.fnbody);
-    try stdout_writer.print("add sp, sp, #{}\n", .{f.stack_size});
-    try stdout_writer.print("{s}\n", .{fn_epilogue});
+
+    try stdout_writer.print(" .globl _main\n.align 2\n", .{});
+
+    for (functions.items) |*f| {
+        // TODO: make this a local instead of a global
+        depth = 0;
+        var codegen_ctx = CodegenContext{ .current_func = f };
+        try stdout_writer.print("_{s}:\n", .{f.name});
+
+        try stdout_writer.print("{s}\n", .{fn_prologue});
+        try stdout_writer.print(";; making space for local variables in stack\n", .{});
+        try stdout_writer.print("sub sp, sp, #{}\n", .{f.stack_size});
+        try gen_stmt(f.fnbody, &codegen_ctx);
+        std.debug.assert(depth == 0);
+        try stdout_writer.print("add sp, sp, #{}\n", .{f.stack_size});
+        try stdout_writer.print("return_label.{s}:\n", .{f.name});
+        try stdout_writer.print("{s}\n", .{fn_epilogue});
+    }
 }
 
 const ParseContext = struct {
@@ -761,19 +802,21 @@ const ParseContext = struct {
     alloc: Allocator,
     locals: ObjList,
 };
-const Function = struct { fnbody: *Node, locals: ObjList, stack_size: usize };
+const Function = struct { fnbody: *Node, locals: ObjList, stack_size: usize, name: []const u8 };
 
 fn align_to(n: usize, al: u32) usize {
     return (n + al - 1) / al * al;
 }
 
-fn assign_lvar_offsets(prog: *Function) void {
-    var offset: usize = 0;
-    for (prog.locals.items) |*local| {
-        offset += 8;
-        local.*.offset = offset;
+fn assign_lvar_offsets(functions: std.ArrayList(Function)) void {
+    for (functions.items) |*f| {
+        var offset: usize = 0;
+        for (f.locals.items) |*local| {
+            offset += 8;
+            local.*.offset = offset;
+        }
+        f.*.stack_size = align_to(offset, 16);
     }
-    prog.*.stack_size = align_to(offset, 16);
 }
 
 fn find_local_var(ident: []const u8, locals: ObjList) ?*Obj {
@@ -785,11 +828,9 @@ fn find_local_var(ident: []const u8, locals: ObjList) ?*Obj {
     return null;
 }
 
-//FIXME: How do I make this a local within the main codegen function ?
-var if_branch_val: u32 = 0;
-fn update_branch_count() u32 {
-    if_branch_val += 1;
-    return if_branch_val;
+fn update_branch_count(ctx: *CodegenContext) u32 {
+    ctx.branch_count += 1;
+    return ctx.branch_count;
 }
 
 fn add_type(ally: Allocator, n: *Node) void {
@@ -842,7 +883,10 @@ fn add_type(ally: Allocator, n: *Node) void {
             n.n_type = n.variable.?.typ;
         },
         NodeKind.Addr => {
-            n.n_type = pointer_to(ally, n.lhs.?.n_type.?) catch panic("failed to create Pointer type to {?}\n", .{n.lhs.?.n_type.?});
+            //TODO: The 3rd arg to pointer_to is a hack
+            //as I couldn't figure out which is the right token to pass. fix it
+            //when possible
+            n.n_type = Type.pointer_to(ally, n.lhs.?.n_type.?, n.lhs.?.n_type.?.tok) catch panic("failed to create Pointer type to {?}\n", .{n.lhs.?.n_type.?});
         },
         NodeKind.Deref => {
             if (n.lhs.?.n_type.?.kind != TypeKind.Ptr) {
@@ -855,41 +899,13 @@ fn add_type(ally: Allocator, n: *Node) void {
         },
     }
 }
-// TODO: This can be memoized
-fn pointer_to(alloc: Allocator, base: *const Type) !*Type {
-    var derived = try alloc.create(Type);
-    derived.kind = TypeKind.Ptr;
-    derived.base = base;
-    return derived;
-}
 
 // declspec = "int"
+// returns a `Type` from the stream
 fn declspec(p: *ParseContext) *Type {
     var stream = p.stream;
     stream.skip(&INT);
     return &IntBaseType;
-}
-
-// declarator = "*"* ident
-// (either a bare identifier or a series of derefs followed by an identifier)
-// (eg; x or *x or **y)
-fn declarator(p: *ParseContext, typ: *Type) !*Type {
-    var stream = p.stream;
-    var actual_type = typ;
-    while (stream.consume(&DEREF)) {
-        actual_type = try pointer_to(p.alloc, actual_type);
-    }
-    var top = stream.top();
-    switch (top.*) {
-        TokenKind.ident => {
-            actual_type.tok = stream.top();
-            stream.advance();
-            return actual_type;
-        },
-        else => {
-            panic("Expected Ident token for declarator, got {?}\n", .{stream.top()});
-        },
-    }
 }
 
 //declaration = declspec (declarator ("=" expr)? ("," declarator ("=" expr)?)*)? ";"
@@ -937,4 +953,48 @@ fn declaration(p: *ParseContext) !*Node {
     s.advance();
     var declaration_block = try Node.from_block(p.alloc, head_node, dec_block_tok);
     return declaration_block;
+}
+
+////////////////
+//  These are functions that parse for Type Nodes
+//  not value or other types of expression nodes etc
+////////////////
+
+// declarator = "*"* ident
+// (either a bare identifier or a series of derefs followed by an identifier)
+// (eg; x or *x or **y)
+// typ is the expected type of the `ident`
+fn declarator(p: *ParseContext, typ: *Type) !*Type {
+    var stream = p.stream;
+    var actual_type = typ;
+    var top = stream.top();
+    while (stream.consume(&DEREF)) {
+        actual_type = try Type.pointer_to(p.alloc, actual_type, top);
+    }
+    top = stream.top();
+    switch (top.*) {
+        TokenKind.ident => {
+            actual_type.tok = stream.top();
+            stream.advance();
+            var ty = try type_suffix(p, actual_type);
+            ty.tok = top;
+            return ty;
+        },
+        else => {
+            panic("Expected Ident token for declarator, got {?}\n", .{stream.top()});
+        },
+    }
+}
+
+// type-suffix = ("(" func-params)?
+// for 0-arg fns we do not parse any func-params
+// only "(" ")"
+fn type_suffix(p: *ParseContext, return_type: *Type) !*Type {
+    if (p.stream.top().equal(&LPAREN)) {
+        p.stream.advance(); // consume lparen
+        p.stream.skip(&RPAREN); // consume rparen
+        return try Type.func_type(p.alloc, return_type);
+    } else {
+        return return_type;
+    }
 }
