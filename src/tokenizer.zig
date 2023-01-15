@@ -153,7 +153,7 @@ pub const Stream = struct {
         if (top_token.equal(t) == true) {
             self.advance();
         } else {
-            panic(" stream.skip Expected token {?} got {?}\n", .{ t, top_token });
+            panic(" stream.skip Expected token {?} got {?} at idx {}\n", .{ t, top_token, self.idx });
         }
     }
 

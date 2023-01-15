@@ -49,7 +49,10 @@ const Type = struct {
     kind: TypeKind,
     base: ?*const Type = null,
     tok: *const Token,
-    return_type: ?*const Type = null,
+    return_type: ?*const Type = null, // this is just for fns
+
+    params: ?std.ArrayList(*Type) = null,
+    next: ?*Type = null,
     const Self = @This();
     pub fn func_type(alloc: Allocator, return_type: *const Self) !*Type {
         var fn_type = try alloc.create(Self);
@@ -64,11 +67,17 @@ const Type = struct {
         derived.tok = tok;
         return derived;
     }
+
+    fn copy_type(alloc: Allocator, original: *const Type) !*Type {
+        var copy = try alloc.create(Type);
+        copy.* = original.*;
+        return copy;
+    }
 };
 
 // this should be a const, but that makes the pointer to this a *const Type and
 // it is very annoying to change aftewards, so guess I will deal with this later
-var IntBaseType = Type{ .kind = TypeKind.Int, .base = null, .tok = &INT };
+var IntBaseType = Type{ .kind = TypeKind.Int, .base = null, .tok = &INT, .params = null };
 
 // A variable in our C code
 const Obj = struct {
@@ -108,7 +117,7 @@ pub const Node = struct {
     variable: ?*Obj = null, // Used when Kind = var
     tok: ?*const Token = null, // The token in the parse stream that was
     fn_name: []const u8 = span(""), // Used when Kind = Funcall
-    fn_args: NodeList = undefined, //  Used when Kind = Funcall
+    fn_args: ?NodeList = null, //  Used when Kind = Funcall
     return_type: ?*Type = null,
     //used as a basis to create this node
     // self is a pointer into global heap region or a fn-local heap
@@ -551,15 +560,23 @@ fn compound_statement(p: *ParseContext) anyerror!*Node {
     stream.advance();
     return compound_stmt_node;
 }
-
+// declspec declarator type-suffix
 pub fn function(p: *ParseContext) !Function {
+    // get fn return type, name and parameter variables
     var typ = declspec(p);
     typ = try declarator(p, typ);
+
+    var param_vars = std.ArrayList(*Obj).init(p.alloc);
+    try create_param_lvars(p.alloc, typ.params, &param_vars);
+    for (param_vars.items) |param| {
+        try p.locals.insert(0, param);
+    }
 
     p.stream.skip(&LBRACE);
     var fn_statements = try compound_statement(p);
 
-    var f = Function{ .stack_size = 0, .name = Token.get_ident(typ.tok), .fnbody = fn_statements, .locals = p.locals };
+    var f = Function{ .stack_size = 0, .name = Token.get_ident(typ.tok), .fnbody = fn_statements, .locals = p.locals, .params = param_vars };
+
     return f;
 }
 pub fn parse(s: *Stream, alloc: Allocator) !std.ArrayList(Function) {
@@ -586,8 +603,8 @@ const fn_prologue =
 // each fn's body will sub sp based on the # of local vars after `fn_prologue`
 // similarly each fn will add sp to its original location based on the # of local vars after `fn_epilogue`
 const fn_epilogue =
+    \\ sub sp, x29, -16
     \\ ldp x29, x30, [x29]
-    \\ add sp, sp, 16
     \\ ret
 ;
 // At the end of this, X0 will have the addr
@@ -612,13 +629,13 @@ fn gen_addr(node: *Node, ctx: *CodegenContext) !void {
 var depth: u32 = 0;
 var args_regs = [_][]const u8{ "x0", "x1", "x2", "x3", "x4", "x5", "x6", "x7" };
 // ** Code-Generation ** //
-fn push() !void {
-    depth += 1;
+fn push(ctx: *CodegenContext) !void {
+    ctx.stack_depth += 1;
     try stdout.writer().print("str X0, [sp, -16]\n", .{});
     try stdout.writer().print("sub sp, sp, #16\n", .{});
 }
-fn pop(reg: []const u8) !void {
-    depth -= 1;
+fn pop(reg: []const u8, ctx: *CodegenContext) !void {
+    ctx.stack_depth -= 1;
     try stdout.writer().print("ldr {s}, [sp]\n", .{reg});
     try stdout.writer().print("add sp, sp, #16\n", .{});
 }
@@ -641,19 +658,19 @@ pub fn gen_expr(node: *Node, ctx: *CodegenContext) anyerror!void {
         try stdout.writer().print("neg x0, x0\n", .{});
     } else if (node.kind == NodeKind.Assign) {
         try gen_addr(node.lhs.?, ctx); //x0 has addr of variable
-        try push(); //push x0 into stack
+        try push(ctx); //push x0 into stack
         try gen_expr(node.rhs.?, ctx); // x0 now has value
-        try pop(span("x1")); // x1 has addr of variable
+        try pop(span("x1"), ctx); // x1 has addr of variable
         try stdout.writer().print("str X0, [X1]\n", .{});
     } else if (node.kind == NodeKind.Funcall) {
         var args_len: usize = 0;
-        for (node.fn_args.items) |arg| {
+        for (node.fn_args.?.items) |arg| {
             try gen_expr(arg, ctx);
-            try push();
+            try push(ctx);
             args_len += 1;
         }
         while (args_len > 0) : (args_len -= 1) {
-            try pop(args_regs[args_len - 1]);
+            try pop(args_regs[args_len - 1], ctx);
             if (args_len == 0) {
                 break;
             }
@@ -670,16 +687,16 @@ pub fn gen_expr(node: *Node, ctx: *CodegenContext) anyerror!void {
         // we can then use this as an input into the subsequent Add, Sub, Mul, Div
         // instructions, instead of pushing and popping from stack
         try gen_expr(node.rhs.?, ctx);
-        try push();
+        try push(ctx);
         try gen_expr(node.lhs.?, ctx);
-        try pop(span("x1"));
+        try pop(span("x1"), ctx);
         // Idea: Add should be able to take a reg (x0..x18) as input and generate
         // instructions as per that
         // for each instruction, we keep track of which x register is free and then emit instructions
         // into that reg and then cross out that register as occupied
         switch (node.kind) {
             NodeKind.Add => {
-                try stdout.writer().print("add x0, x0, x1\n", .{});
+                try stdout.writer().print("add x0, x1, x0\n", .{});
             },
             NodeKind.Sub => {
                 try stdout.writer().print("sub x0, x0, x1\n", .{});
@@ -725,8 +742,13 @@ fn gen_stmt(n: *Node, ctx: *CodegenContext) !void {
             // we jump to else
             var branch_id = update_branch_count(ctx);
             try stdout_writer.print("cmp x0, #0\n", .{});
+            //TODO: Add fn name as prefix to branch tag
             try stdout_writer.print("b.eq else_label_{}\n", .{branch_id});
+
             try gen_stmt(n.then.?, ctx);
+
+            try stdout_writer.print("b.eq else_label_{}\n", .{branch_id});
+
             try stdout_writer.print("b end_label_{}\n", .{branch_id});
             try stdout_writer.print("else_label_{}:\n", .{branch_id});
             if (n.els) |else_stmt| {
@@ -765,7 +787,7 @@ fn gen_stmt(n: *Node, ctx: *CodegenContext) !void {
         },
         NodeKind.Ret => {
             try gen_expr(n.lhs.?, ctx);
-            try stdout_writer.print("b return_label.{s}\n", .{ctx.current_func.name});
+            try stdout_writer.print("b return_label._{s}\n", .{ctx.current_func.name});
             return;
         },
         else => {
@@ -773,7 +795,7 @@ fn gen_stmt(n: *Node, ctx: *CodegenContext) !void {
         },
     }
 }
-const CodegenContext = struct { current_func: *const Function, branch_count: u32 = 0 };
+const CodegenContext = struct { current_func: *const Function, branch_count: u32 = 0, stack_depth: usize = 0 };
 pub fn codegen(functions: std.ArrayList(Function)) !void {
     assign_lvar_offsets(functions);
     var stdout_writer = stdout.writer();
@@ -782,17 +804,26 @@ pub fn codegen(functions: std.ArrayList(Function)) !void {
 
     for (functions.items) |*f| {
         // TODO: make this a local instead of a global
-        depth = 0;
         var codegen_ctx = CodegenContext{ .current_func = f };
         try stdout_writer.print("_{s}:\n", .{f.name});
 
         try stdout_writer.print("{s}\n", .{fn_prologue});
+        codegen_ctx.stack_depth += 2;
         try stdout_writer.print(";; making space for local variables in stack\n", .{});
         try stdout_writer.print("sub sp, sp, #{}\n", .{f.stack_size});
+        codegen_ctx.stack_depth += f.stack_size;
+        for (f.params.items) |p, i| {
+            try stdout_writer.print("str {s}, [x29, -{}]\n", .{ args_regs[i], p.offset });
+        }
+
         try gen_stmt(f.fnbody, &codegen_ctx);
-        std.debug.assert(depth == 0);
         try stdout_writer.print("add sp, sp, #{}\n", .{f.stack_size});
-        try stdout_writer.print("return_label.{s}:\n", .{f.name});
+        codegen_ctx.stack_depth -= f.stack_size;
+        codegen_ctx.stack_depth -= 2; // fn epilogues
+
+        std.debug.assert(codegen_ctx.stack_depth == 0);
+
+        try stdout_writer.print("return_label._{s}:\n", .{f.name});
         try stdout_writer.print("{s}\n", .{fn_epilogue});
     }
 }
@@ -802,7 +833,7 @@ const ParseContext = struct {
     alloc: Allocator,
     locals: ObjList,
 };
-const Function = struct { fnbody: *Node, locals: ObjList, stack_size: usize, name: []const u8 };
+const Function = struct { fnbody: *Node, locals: ObjList, stack_size: usize, name: []const u8, params: ObjList };
 
 fn align_to(n: usize, al: u32) usize {
     return (n + al - 1) / al * al;
@@ -872,11 +903,17 @@ fn add_type(ally: Allocator, n: *Node) void {
         }
     }
 
+    if (n.fn_args) |fargs| {
+        for (fargs.items) |fitem| {
+            add_type(ally, fitem);
+        }
+    }
+
     switch (n.kind) {
         NodeKind.Add, NodeKind.Unary, NodeKind.Sub, NodeKind.Mul, NodeKind.Div, NodeKind.Assign => {
             n.n_type = n.lhs.?.n_type;
         },
-        NodeKind.Eq, NodeKind.Neq, NodeKind.Lt, NodeKind.Lte, NodeKind.Num => {
+        NodeKind.Eq, NodeKind.Neq, NodeKind.Lt, NodeKind.Lte, NodeKind.Num, NodeKind.Funcall => {
             n.n_type = &IntBaseType;
         },
         NodeKind.Var => {
@@ -986,15 +1023,41 @@ fn declarator(p: *ParseContext, typ: *Type) !*Type {
     }
 }
 
-// type-suffix = ("(" func-params)?
-// for 0-arg fns we do not parse any func-params
-// only "(" ")"
-fn type_suffix(p: *ParseContext, return_type: *Type) !*Type {
-    if (p.stream.top().equal(&LPAREN)) {
-        p.stream.advance(); // consume lparen
-        p.stream.skip(&RPAREN); // consume rparen
-        return try Type.func_type(p.alloc, return_type);
+// type-suffix = ("(" func-params? ")")?
+// func-params = param (, param)*
+// param = declspec declarator
+fn type_suffix(p: *ParseContext, return_type: *Type) anyerror!*Type {
+    var s = p.stream;
+    if (s.top().equal(&LPAREN)) {
+        s.advance(); // consume "("
+
+        var params = std.ArrayList(*Type).init(p.alloc);
+        while (s.top().equal(&RPAREN) == false) {
+            if (params.items.len > 0) {
+                s.skip(&COMMA);
+            }
+            var param_type = declspec(p);
+            var param = try declarator(p, param_type);
+            try params.insert(0, try Type.copy_type(p.alloc, param));
+        }
+        s.advance(); // consume ")"
+        //TODO: Params gets fucked up here, as it somehow makes multiple
+        //copeis of the last argument and discards first. how ?
+        var fn_type = try Type.func_type(p.alloc, return_type);
+        fn_type.params = params;
+
+        return fn_type;
     } else {
         return return_type;
+    }
+}
+
+// create variables fn func parameters
+fn create_param_lvars(alloc: Allocator, params_decl_list: ?std.ArrayList(*Type), vars_list: *ObjList) !void {
+    if (params_decl_list) |decl_list| {
+        for (decl_list.items) |d| {
+            var arg = try Obj.alloc_obj(alloc, d.tok.get_ident(), d);
+            try vars_list.insert(0, arg);
+        }
     }
 }
