@@ -1098,6 +1098,7 @@ fn func_params(p: *ParseContext, return_type: *Type) anyerror!*Type {
 }
 // type-suffix =   "(" func-params
 //               | "[" num "]"
+//               | "[" num "]" type-suffix
 //               | nothing
 // func-params = param (, param)*
 // param = declspec declarator
@@ -1117,7 +1118,8 @@ fn type_suffix(p: *ParseContext, return_type: *Type) anyerror!*Type {
         var siz_i64 = @as(i64, siz);
 
         s.skip(&RSQ_BRACK);
-        return Type.array_of(p.alloc, return_type, @bitCast(usize, siz_i64), tok);
+        var next_dim_array = try type_suffix(p, return_type);
+        return Type.array_of(p.alloc, next_dim_array, @bitCast(usize, siz_i64), tok);
     } else {
         return return_type;
     }
