@@ -6,7 +6,7 @@ const Stream = tokenizer.Stream;
 const Allocator = std.mem.Allocator;
 const span = std.mem.span;
 const panic = std.debug.panic;
-const all_valid_chars = "()/*+-==!=<<=>>=;={}ifelse()forwhile&*,";
+const all_valid_chars = "()/*+-==!=<<=>>=;={}ifelse()forwhile&*,[]";
 const stdout = std.io.getStdOut();
 pub const LEFT_PAREN = Token{ .punct = .{ .ptr = span(all_valid_chars[0..1]) } };
 pub const RIGHT_PAREN = Token{ .punct = .{ .ptr = span(all_valid_chars[1..2]) } };
@@ -33,6 +33,8 @@ pub const WHILE = Token{ .keyword = .{ .ptr = span(all_valid_chars[31..36]) } };
 pub const ADDR = Token{ .punct = .{ .ptr = span(all_valid_chars[36..37]) } };
 pub const DEREF = Token{ .punct = .{ .ptr = span(all_valid_chars[37..38]) } };
 pub const COMMA = Token{ .punct = .{ .ptr = span(all_valid_chars[38..39]) } };
+pub const LSQ_BRACK = Token{ .punct = .{ .ptr = span(all_valid_chars[39..40]) } };
+pub const RSQ_BRACK = Token{ .punct = .{ .ptr = span(all_valid_chars[40..41]) } };
 
 pub const RETURN = Token{ .keyword = .{ .ptr = span("return") } };
 pub const INT = Token{ .keyword = .{ .ptr = span("int") } };
@@ -43,16 +45,25 @@ pub const INT = Token{ .keyword = .{ .ptr = span("int") } };
 // but in `while`, we disregard `inc`
 const NodeKind = enum { Add, Sub, Mul, Div, Unary, Num, Eq, Neq, Lt, Lte, ExprStmt, Assign, Var, Ret, Block, If, For, Addr, Deref, Funcall };
 
-const TypeKind = enum { Int, Ptr, Func };
+const TypeKind = enum { Int, Ptr, Func, Array };
 // Type information about variables
 const Type = struct {
     kind: TypeKind,
+    // Pointer-to or array-of type. We intentionally use the same member
+    // to represent pointer/array duality in C.
+    //
+    // In many contexts in which a pointer is expected, we examine this
+    // member instead of "kind" member to determine whether a type is a
+    // pointer or not. That means in many contexts "array of T" is
+    // naturally handled as if it were "pointer to T", as required by
+    // the C spec.
     base: ?*const Type = null,
     tok: *const Token,
     return_type: ?*const Type = null, // this is just for fns
-
+    size: usize, // The size of a value of this type
     params: ?std.ArrayList(*Type) = null,
     next: ?*Type = null,
+    array_len: usize = 0, // applies only when kind = Array
     const Self = @This();
     pub fn func_type(alloc: Allocator, return_type: *const Self) !*Type {
         var fn_type = try alloc.create(Self);
@@ -65,6 +76,7 @@ const Type = struct {
         derived.kind = TypeKind.Ptr;
         derived.base = base;
         derived.tok = tok;
+        derived.size = @as(usize, 8);
         return derived;
     }
 
@@ -73,11 +85,17 @@ const Type = struct {
         copy.* = original.*;
         return copy;
     }
+
+    fn array_of(alloc: Allocator, base: *const Type, len: usize, tok: *const Token) !*Type {
+        var array_type = try alloc.create(Type);
+        array_type.* = .{ .base = base, .size = base.size * len, .kind = TypeKind.Array, .array_len = len, .tok = tok };
+        return array_type;
+    }
 };
 
 // this should be a const, but that makes the pointer to this a *const Type and
 // it is very annoying to change aftewards, so guess I will deal with this later
-var IntBaseType = Type{ .kind = TypeKind.Int, .base = null, .tok = &INT, .params = null };
+var IntBaseType = Type{ .kind = TypeKind.Int, .base = null, .tok = &INT, .params = null, .size = 8 };
 
 // A variable in our C code
 const Obj = struct {
@@ -217,8 +235,8 @@ fn new_add(p: *ParseContext, lhs: ?*Node, rhs: ?*Node, tok: *Token) !*Node {
         return add_node;
     }
 
-    // why ? because cannot add ptr + ptr
-    // all pointer vars will have n_type = TypeKind.Ptr and the base type of
+    // when n_type.base != null, then then this is a Pointer type
+    // in C, ptr + ptr is not possible
     // TypeKind.Ptr will be Int (for now just Int, other types will be added later)
     if (lhs.?.n_type.?.base != null and rhs.?.n_type.?.base != null) {
         panic("Invalid operands for arithmetic {?}\n", .{tok});
@@ -230,7 +248,11 @@ fn new_add(p: *ParseContext, lhs: ?*Node, rhs: ?*Node, tok: *Token) !*Node {
         l = rhs;
         r = lhs;
     }
-    var stride_node = try Node.from_num(p.alloc, 8, tok); // For now we recognize only 8 byte integers
+    // stride = num * sizeof(typeOf(value pointer by ptr))
+    // the following is rather unsafe, but works for now.
+    // TODO: Figure out how to improve this later.
+    var stride_val = @truncate(u32, lhs.?.n_type.?.base.?.size);
+    var stride_node = try Node.from_num(p.alloc, @intCast(i32, stride_val), tok); // For now we recognize only 8 byte integers
     // Later we will utilize the size of the type from *Node `l`
     var new_rhs = try Node.from_binary(p.alloc, NodeKind.Mul, r, stride_node, tok);
     var new_binary = try Node.from_binary(p.alloc, NodeKind.Add, l, new_rhs, tok);
@@ -247,7 +269,8 @@ fn new_sub(p: *ParseContext, lhs: ?*Node, rhs: ?*Node, tok: *Token) !*Node {
         return sub_node;
     }
 
-    var stride_node = try Node.from_num(p.alloc, 8, tok); // For now we recognize only 8 byte integers
+    var stride_val = @truncate(u32, lhs.?.n_type.?.base.?.size);
+    var stride_node = try Node.from_num(p.alloc, @intCast(i32, stride_val), tok); // For now we recognize only 8 byte integers
 
     // ptr - num
     if (lhs.?.n_type.?.base != null and rhs.?.n_type.?.kind == TypeKind.Int) {
@@ -260,9 +283,12 @@ fn new_sub(p: *ParseContext, lhs: ?*Node, rhs: ?*Node, tok: *Token) !*Node {
         return new_binary;
     }
     // ptr - ptr, which returns how many elements are between the two.
+    // TODO: add check later that the base types of lhs and rhs are the same
     if (lhs.?.n_type.?.base != null and rhs.?.n_type.?.base != null) {
+        // (ptr2-ptr)
         var sub_res = try Node.from_binary(p.alloc, NodeKind.Sub, lhs, rhs, tok);
         sub_res.n_type = &IntBaseType;
+        // (ptr2-ptr1) / (sizeof(elementofptr1))
         var new_binary = Node.from_binary(p.alloc, NodeKind.Div, sub_res, stride_node, tok);
         return new_binary;
     }
@@ -592,9 +618,6 @@ pub fn parse(s: *Stream, alloc: Allocator) !std.ArrayList(Function) {
     return functions;
 }
 
-// In ARM assembler default alignment is a 4-byte boundart
-// .align takes argument `exponent` and alignment = 2 power exponent
-
 const fn_prologue =
     \\ sub sp, sp, #16
     \\ stp x29, x30, [sp]
@@ -639,19 +662,41 @@ fn pop(reg: []const u8, ctx: *CodegenContext) !void {
     try stdout.writer().print("ldr {s}, [sp]\n", .{reg});
     try stdout.writer().print("add sp, sp, #16\n", .{});
 }
+
+// from an address in x0, load a value into x0
+fn load(ty: *const Type) anyerror!void {
+    if (ty.kind == TypeKind.Array) {
+        // If it is an array, do not attempt to load a value to the
+        // register because in general we can't load an entire array to a
+        // register. As a result, the result of an evaluation of an array
+        // becomes not the array itself but the address of the array.
+        // This is where "array is automatically converted to a pointer to
+        // the first element of the array in C" occurs.
+        return;
+    }
+    try stdout.writer().print("ldr x0, [x0]\n", .{});
+}
+
+// Store x0 to an address that the stack top is pointing to.
+fn store(reg: []const u8, ctx: *CodegenContext) anyerror!void {
+    try pop(reg, ctx);
+    try stdout.writer().print("str x0, [x2]\n", .{});
+}
 // Code generation
+// Depending on the kind of node, the state of registers might
+// vary
 pub fn gen_expr(node: *Node, ctx: *CodegenContext) anyerror!void {
     if (node.kind == NodeKind.Num) {
         try stdout.writer().print(";; loading immediate {} at\n", .{node.val});
         try stdout.writer().print("mov X0, {}\n", .{node.val});
     } else if (node.kind == NodeKind.Var) {
         try gen_addr(node, ctx); //x0 has address of variable
-        try stdout.writer().print("ldr x0, [x0]\n", .{}); // now load val of variable into x0
+        try load(node.n_type.?);
     } else if (node.kind == NodeKind.Addr) {
         try gen_addr(node.lhs.?, ctx); // node should be something like a var whose address we can obtain
     } else if (node.kind == NodeKind.Deref) {
         try gen_expr(node.lhs.?, ctx); // x0 now should have an address (from a variable ideally)
-        try stdout.writer().print("ldr x0, [x0]\n", .{});
+        try load(node.n_type.?);
         //TODO: This should be neg, not Unary
     } else if (node.kind == NodeKind.Unary) {
         try gen_expr(node.lhs.?, ctx);
@@ -660,8 +705,7 @@ pub fn gen_expr(node: *Node, ctx: *CodegenContext) anyerror!void {
         try gen_addr(node.lhs.?, ctx); //x0 has addr of variable
         try push(ctx); //push x0 into stack
         try gen_expr(node.rhs.?, ctx); // x0 now has value
-        try pop(span("x1"), ctx); // x1 has addr of variable
-        try stdout.writer().print("str X0, [X1]\n", .{});
+        try store(span("x2"), ctx);
     } else if (node.kind == NodeKind.Funcall) {
         var args_len: usize = 0;
         for (node.fn_args.?.items) |arg| {
@@ -843,7 +887,7 @@ fn assign_lvar_offsets(functions: std.ArrayList(Function)) void {
     for (functions.items) |*f| {
         var offset: usize = 0;
         for (f.locals.items) |*local| {
-            offset += 8;
+            offset += local.*.typ.size;
             local.*.offset = offset;
         }
         f.*.stack_size = align_to(offset, 16);
@@ -910,11 +954,17 @@ fn add_type(ally: Allocator, n: *Node) void {
     }
 
     switch (n.kind) {
-        NodeKind.Add, NodeKind.Unary, NodeKind.Sub, NodeKind.Mul, NodeKind.Div, NodeKind.Assign => {
+        NodeKind.Add, NodeKind.Unary, NodeKind.Sub, NodeKind.Mul, NodeKind.Div => {
             n.n_type = n.lhs.?.n_type;
         },
         NodeKind.Eq, NodeKind.Neq, NodeKind.Lt, NodeKind.Lte, NodeKind.Num, NodeKind.Funcall => {
             n.n_type = &IntBaseType;
+        },
+        NodeKind.Assign => {
+            if (n.lhs.?.n_type.?.kind == TypeKind.Array) {
+                panic("Something of ArrayType cannot be an lvalue {?}\n", .{n});
+            }
+            n.n_type = n.lhs.?.n_type;
         },
         NodeKind.Var => {
             n.n_type = n.variable.?.typ;
@@ -923,10 +973,16 @@ fn add_type(ally: Allocator, n: *Node) void {
             //TODO: The 3rd arg to pointer_to is a hack
             //as I couldn't figure out which is the right token to pass. fix it
             //when possible
+            if (n.lhs.?.n_type.?.kind == TypeKind.Array) {
+                n.n_type = Type.pointer_to(ally, n.lhs.?.n_type.?.base.?, n.lhs.?.n_type.?.base.?.tok) catch panic("failed to create Pointer type to {?}\n", .{n.lhs.?.n_type.?});
+            }
             n.n_type = Type.pointer_to(ally, n.lhs.?.n_type.?, n.lhs.?.n_type.?.tok) catch panic("failed to create Pointer type to {?}\n", .{n.lhs.?.n_type.?});
         },
         NodeKind.Deref => {
-            if (n.lhs.?.n_type.?.kind != TypeKind.Ptr) {
+            // we can deref either an array or a pointer
+            // so don't check for `type == TypeKind.Ptr
+            // but check if there is a `base` for our type
+            if (n.lhs.?.n_type.?.base == null) {
                 panic("invalid pointer dereference {?}\n", .{n.lhs});
             }
             n.n_type = n.lhs.?.n_type.?.base;
@@ -1022,31 +1078,46 @@ fn declarator(p: *ParseContext, typ: *Type) !*Type {
         },
     }
 }
+// func-params = (param (",", param)*)? ")"
+fn func_params(p: *ParseContext, return_type: *Type) anyerror!*Type {
+    var s = p.stream;
+    var params = std.ArrayList(*Type).init(p.alloc);
+    while (s.top().equal(&RPAREN) == false) {
+        if (params.items.len > 0) {
+            s.skip(&COMMA);
+        }
+        var param_type = declspec(p);
+        var param = try declarator(p, param_type);
+        try params.insert(0, try Type.copy_type(p.alloc, param));
+    }
+    s.advance(); // consume ")"
 
-// type-suffix = ("(" func-params? ")")?
+    var fn_type = try Type.func_type(p.alloc, return_type);
+    fn_type.params = params;
+    return fn_type;
+}
+// type-suffix =   "(" func-params
+//               | "[" num "]"
+//               | nothing
 // func-params = param (, param)*
 // param = declspec declarator
 fn type_suffix(p: *ParseContext, return_type: *Type) anyerror!*Type {
     var s = p.stream;
     if (s.top().equal(&LPAREN)) {
         s.advance(); // consume "("
-
-        var params = std.ArrayList(*Type).init(p.alloc);
-        while (s.top().equal(&RPAREN) == false) {
-            if (params.items.len > 0) {
-                s.skip(&COMMA);
-            }
-            var param_type = declspec(p);
-            var param = try declarator(p, param_type);
-            try params.insert(0, try Type.copy_type(p.alloc, param));
+        return try func_params(p, return_type);
+    } else if (s.top().equal(&LSQ_BRACK)) {
+        var tok = s.top();
+        s.advance();
+        var siz = s.top().getNumber();
+        if (siz < 0) {
+            panic("cannot have array size {} that is < 0 at {?}\n", .{ siz, s.top() });
         }
-        s.advance(); // consume ")"
-        //TODO: Params gets fucked up here, as it somehow makes multiple
-        //copeis of the last argument and discards first. how ?
-        var fn_type = try Type.func_type(p.alloc, return_type);
-        fn_type.params = params;
+        s.advance();
+        var siz_i64 = @as(i64, siz);
 
-        return fn_type;
+        s.skip(&RSQ_BRACK);
+        return Type.array_of(p.alloc, return_type, @bitCast(usize, siz_i64), tok);
     } else {
         return return_type;
     }

@@ -85,6 +85,16 @@ pub const Token = union(TokenKind) {
         }
     }
 
+    pub fn getNumber(tok: *const Self) i32 {
+        switch (tok.*) {
+            TokenKind.num => |v| {
+                return v.val;
+            },
+            else => {
+                panic("expected num token, got {?}\n", .{tok});
+            },
+        }
+    }
     pub fn format(self: Self, comptime _: []const u8, _: std.fmt.FormatOptions, out_stream: anytype) !void {
         switch (self) {
             TokenKind.num => |v| {
