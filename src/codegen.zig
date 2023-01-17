@@ -197,7 +197,7 @@ pub const Node = struct {
                 try std.fmt.format(out_stream, "Node {?} starting at {?} with lhs {?}\n", .{ self.kind, self.tok, self.lhs });
             },
             NodeKind.Num => {
-                try std.fmt.format(out_stream, "Number node {?} with value {?}\n", .{ self.tok, self.val });
+                try std.fmt.format(out_stream, "Number node {?} with value {?} and type {?}\n", .{ self.tok, self.val, self.n_type });
             },
 
             NodeKind.ExprStmt => {
@@ -227,8 +227,11 @@ pub const Node = struct {
 const NodeList = std.ArrayList(*Node);
 
 fn new_add(p: *ParseContext, lhs: ?*Node, rhs: ?*Node, tok: *Token) !*Node {
-    if (lhs) |l| add_type(p.alloc, l);
-    if (rhs) |r| add_type(p.alloc, r);
+    if (lhs) |l|
+        add_type(p.alloc, l);
+
+    if (rhs) |r|
+        add_type(p.alloc, r);
 
     if (lhs.?.n_type.?.kind == TypeKind.Int and rhs.?.n_type.?.kind == TypeKind.Int) {
         var add_node = try Node.from_binary(p.alloc, NodeKind.Add, lhs, rhs, tok);
@@ -251,7 +254,8 @@ fn new_add(p: *ParseContext, lhs: ?*Node, rhs: ?*Node, tok: *Token) !*Node {
     // stride = num * sizeof(typeOf(value pointer by ptr))
     // the following is rather unsafe, but works for now.
     // TODO: Figure out how to improve this later.
-    var stride_val = @truncate(u32, lhs.?.n_type.?.base.?.size);
+
+    var stride_val = @truncate(u32, l.?.n_type.?.base.?.size);
     var stride_node = try Node.from_num(p.alloc, @intCast(i32, stride_val), tok); // For now we recognize only 8 byte integers
     // Later we will utilize the size of the type from *Node `l`
     var new_rhs = try Node.from_binary(p.alloc, NodeKind.Mul, r, stride_node, tok);
@@ -312,6 +316,7 @@ fn fncall(p: *ParseContext) !*Node {
     var fn_node = try Node.from_fncall(p.alloc, top.get_ident(), args_list, top);
     return fn_node;
 }
+
 // primary =      '(' expr ')'
 //             |  variable
 //             |  number
@@ -351,8 +356,23 @@ fn primary(p: *ParseContext) anyerror!*Node {
     }
 }
 
+// postfix = primary ("[" expr "]")*
+fn postfix(p: *ParseContext) anyerror!*Node {
+    var prim = try primary(p);
+    var s = p.stream;
+    while (s.top().equal(&LSQ_BRACK)) {
+        var start = s.top();
+        s.advance();
+        var idx = try expr(p);
+        s.skip(&RSQ_BRACK);
+        // a[4] will be turned int soemthing like *(a+4)
+        var idx_access = try new_add(p, prim, idx, start);
+        prim = try Node.from_unary(p.alloc, NodeKind.Deref, idx_access, start);
+    }
+    return prim;
+}
 // unary = ( '+' | '-' | '*' | '&' | '*' ) unary
-//         | primary
+//         | postfix
 fn unary(p: *ParseContext) !*Node {
     var stream = p.stream;
     var stream_top = stream.top();
@@ -375,7 +395,7 @@ fn unary(p: *ParseContext) !*Node {
         var unary_node = try Node.from_unary(p.alloc, NodeKind.Deref, lhs, stream_top);
         return unary_node;
     }
-    return primary(p);
+    return postfix(p);
 }
 
 fn mul(p: *ParseContext) !*Node {
