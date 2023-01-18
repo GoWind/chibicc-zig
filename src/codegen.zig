@@ -38,6 +38,8 @@ pub const RSQ_BRACK = Token{ .punct = .{ .ptr = span(all_valid_chars[40..41]) } 
 
 pub const RETURN = Token{ .keyword = .{ .ptr = span("return") } };
 pub const INT = Token{ .keyword = .{ .ptr = span("int") } };
+pub const SIZEOF = Token{ .keyword = .{ .ptr = span("sizeof") } };
+
 // ** AST Generation ** //
 
 // Code emitter
@@ -318,8 +320,9 @@ fn fncall(p: *ParseContext) !*Node {
 }
 
 // primary =      '(' expr ')'
-//             |  variable
+//             |  ident func-args?
 //             |  number
+//             |  "sizeof" unary
 fn primary(p: *ParseContext) anyerror!*Node {
     var s = p.stream;
     var top_token = s.top();
@@ -330,29 +333,37 @@ fn primary(p: *ParseContext) anyerror!*Node {
         s.skip(&RIGHT_PAREN);
         return expression;
     }
-    switch (top_token.*) {
-        TokenKind.ident => |v| {
-            if (s.next().?.equal(&LPAREN)) { // fn call
-                return fncall(p);
-            }
-            var variable: *Obj = undefined;
-            if (find_local_var(v.ptr, p.locals)) |local_var| {
-                variable = local_var;
-            } else {
-                panic("Undefined variable {s}\n", .{v.ptr});
-            }
-            var variable_node = try Node.from_ident(p.alloc, variable, top_token);
-            s.advance();
-            return variable_node;
-        },
-        TokenKind.num => |v| {
-            var num_node = try Node.from_num(p.alloc, v.val, top_token);
-            s.advance();
-            return num_node;
-        },
-        else => {
-            panic("unexpected token {?} to parse as primary\n", .{top_token.*});
-        },
+    if (top_token.equal(&SIZEOF)) {
+        s.advance();
+        var unary_node = try unary(p);
+        add_type(p.alloc, unary_node);
+        var size_as_u32 = @truncate(u32, unary_node.n_type.?.size);
+        return try Node.from_num(p.alloc, @intCast(i32, size_as_u32), top_token);
+    } else {
+        switch (top_token.*) {
+            TokenKind.ident => |v| {
+                if (s.next().?.equal(&LPAREN)) { // fn call
+                    return fncall(p);
+                }
+                var variable: *Obj = undefined;
+                if (find_local_var(v.ptr, p.locals)) |local_var| {
+                    variable = local_var;
+                } else {
+                    panic("Undefined variable {s}\n", .{v.ptr});
+                }
+                var variable_node = try Node.from_ident(p.alloc, variable, top_token);
+                s.advance();
+                return variable_node;
+            },
+            TokenKind.num => |v| {
+                var num_node = try Node.from_num(p.alloc, v.val, top_token);
+                s.advance();
+                return num_node;
+            },
+            else => {
+                panic("unexpected token {?} to parse as primary\n", .{top_token.*});
+            },
+        }
     }
 }
 
