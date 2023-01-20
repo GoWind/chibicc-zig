@@ -100,12 +100,12 @@ const Type = struct {
 var IntBaseType = Type{ .kind = TypeKind.Int, .base = null, .tok = &INT, .params = null, .size = 8 };
 
 // A variable in our C code
-const Obj = struct {
+const Variable = struct {
     name: []u8,
     offset: usize = 0,
     typ: *Type,
     const Self = @This();
-    fn alloc_obj(alloc: Allocator, name: []const u8, ty: *Type) !*Obj {
+    fn alloc_obj(alloc: Allocator, name: []const u8, ty: *Type) !*Variable {
         var obj = try alloc.create(Self);
         obj.offset = 0;
         obj.name = try alloc.dupe(u8, name);
@@ -114,7 +114,7 @@ const Obj = struct {
     }
 };
 // List of variables that we have encountered so far in our C code
-const ObjList = std.ArrayList(*Obj);
+const VariableList = std.ArrayList(*Variable);
 
 pub const Node = struct {
     const Self = @This();
@@ -134,7 +134,7 @@ pub const Node = struct {
     init: ?*Node = null,
     inc: ?*Node = null,
     val: i32 = 0, // Used when Kind = Num
-    variable: ?*Obj = null, // Used when Kind = var
+    variable: ?*Variable = null, // Used when Kind = var
     tok: ?*const Token = null, // The token in the parse stream that was
     fn_name: []const u8 = span(""), // Used when Kind = Funcall
     fn_args: ?NodeList = null, //  Used when Kind = Funcall
@@ -162,7 +162,7 @@ pub const Node = struct {
         self.* = .{ .kind = NodeKind.ExprStmt, .lhs = lhs, .tok = tok };
         return self;
     }
-    pub fn from_ident(alloc: Allocator, variable: *Obj, tok: ?*const Token) !*Self {
+    pub fn from_ident(alloc: Allocator, variable: *Variable, tok: ?*const Token) !*Self {
         var self = try alloc.create(Self);
         self.* = .{ .kind = NodeKind.Var, .variable = variable, .tok = tok };
         return self;
@@ -345,7 +345,7 @@ fn primary(p: *ParseContext) anyerror!*Node {
                 if (s.next().?.equal(&LPAREN)) { // fn call
                     return fncall(p);
                 }
-                var variable: *Obj = undefined;
+                var variable: *Variable = undefined;
                 if (find_local_var(v.ptr, p.locals)) |local_var| {
                     variable = local_var;
                 } else {
@@ -617,13 +617,11 @@ fn compound_statement(p: *ParseContext) anyerror!*Node {
     stream.advance();
     return compound_stmt_node;
 }
-// declspec declarator type-suffix
-pub fn function(p: *ParseContext) !Function {
-    // get fn return type, name and parameter variables
-    var typ = declspec(p);
-    typ = try declarator(p, typ);
-
-    var param_vars = std.ArrayList(*Obj).init(p.alloc);
+//declarator type-suffix "{" compound_stmt
+pub fn function(p: *ParseContext, return_typ: *Type) !void {
+    var typ = try declarator(p, return_typ);
+    // p.locals must always be empty before this
+    var param_vars = std.ArrayList(*Variable).init(p.alloc);
     try create_param_lvars(p.alloc, typ.params, &param_vars);
     for (param_vars.items) |param| {
         try p.locals.insert(0, param);
@@ -633,20 +631,18 @@ pub fn function(p: *ParseContext) !Function {
     var fn_statements = try compound_statement(p);
 
     var f = Function{ .stack_size = 0, .name = Token.get_ident(typ.tok), .fnbody = fn_statements, .locals = p.locals, .params = param_vars };
-
-    return f;
+    try p.globals.insert(0, Obj{ .kind = ObjKind.Function, .payload = ObjPayload{ .function = f } });
 }
-pub fn parse(s: *Stream, alloc: Allocator) !std.ArrayList(Function) {
-    var parse_context = ParseContext{ .stream = s, .alloc = alloc, .locals = ObjList.init(alloc) };
-    const functions_list = std.ArrayList(Function);
-    var functions = functions_list.init(alloc);
+pub fn parse(s: *Stream, alloc: Allocator) !std.ArrayList(Obj) {
+    // Should `locals` also be ObjList or can it just be a VariableList (ie) can C have nested structs and functions ?
+    var parse_context = ParseContext{ .stream = s, .alloc = alloc, .locals = VariableList.init(alloc), .globals = ObjList.init(alloc) };
     while (!s.is_eof()) {
-        var next_fn = try function(&parse_context);
-        try functions.append(next_fn);
+        var decl = declspec(&parse_context);
+        try function(&parse_context, decl);
         //reset list of local variables for each function
-        parse_context.locals = ObjList.init(alloc);
+        _ = parse_context.locals.moveToUnmanaged();
     }
-    return functions;
+    return parse_context.globals;
 }
 
 const fn_prologue =
@@ -870,62 +866,66 @@ fn gen_stmt(n: *Node, ctx: *CodegenContext) !void {
         },
     }
 }
-const CodegenContext = struct { current_func: *const Function, branch_count: u32 = 0, stack_depth: usize = 0 };
-pub fn codegen(functions: std.ArrayList(Function)) !void {
-    assign_lvar_offsets(functions);
+const CodegenContext = struct { current_func: Function, branch_count: u32 = 0, stack_depth: usize = 0 };
+pub fn codegen(objs: std.ArrayList(Obj)) !void {
+    assign_lvar_offsets(objs);
     var stdout_writer = stdout.writer();
 
     try stdout_writer.print(" .globl _main\n.align 2\n", .{});
 
-    for (functions.items) |*f| {
-        // TODO: make this a local instead of a global
+    for (objs.items) |*obj| {
+        if (obj.kind != ObjKind.Function) {
+            continue;
+        }
+        var f = obj.payload.function;
         var codegen_ctx = CodegenContext{ .current_func = f };
+        try stdout_writer.print(".globl _{s}\n", .{f.name});
+        try stdout_writer.print(".text\n", .{});
         try stdout_writer.print("_{s}:\n", .{f.name});
 
         try stdout_writer.print("{s}\n", .{fn_prologue});
-        codegen_ctx.stack_depth += 2;
         try stdout_writer.print(";; making space for local variables in stack\n", .{});
+        try stdout_writer.print(";; stack space for {s} is {}\n", .{ f.name, f.stack_size });
+
         try stdout_writer.print("sub sp, sp, #{}\n", .{f.stack_size});
-        codegen_ctx.stack_depth += f.stack_size;
         for (f.params.items) |p, i| {
             try stdout_writer.print("str {s}, [x29, -{}]\n", .{ args_regs[i], p.offset });
         }
 
         try gen_stmt(f.fnbody, &codegen_ctx);
         try stdout_writer.print("add sp, sp, #{}\n", .{f.stack_size});
-        codegen_ctx.stack_depth -= f.stack_size;
-        codegen_ctx.stack_depth -= 2; // fn epilogues
-
-        std.debug.assert(codegen_ctx.stack_depth == 0);
 
         try stdout_writer.print("return_label._{s}:\n", .{f.name});
         try stdout_writer.print("{s}\n", .{fn_epilogue});
     }
 }
 
-const ParseContext = struct {
-    stream: *Stream,
-    alloc: Allocator,
-    locals: ObjList,
-};
-const Function = struct { fnbody: *Node, locals: ObjList, stack_size: usize, name: []const u8, params: ObjList };
+const ParseContext = struct { stream: *Stream, alloc: Allocator, locals: VariableList, globals: std.ArrayList(Obj) };
+const Function = struct { fnbody: *Node, locals: VariableList, stack_size: usize, name: []const u8, params: VariableList };
 
 fn align_to(n: usize, al: u32) usize {
     return (n + al - 1) / al * al;
 }
 
-fn assign_lvar_offsets(functions: std.ArrayList(Function)) void {
-    for (functions.items) |*f| {
+fn assign_lvar_offsets(objs: std.ArrayList(Obj)) void {
+    for (objs.items) |*obj| {
+        if (obj.kind != ObjKind.Function) {
+            continue;
+        }
+        var f = obj.payload.function;
         var offset: usize = 0;
         for (f.locals.items) |*local| {
             offset += local.*.typ.size;
             local.*.offset = offset;
         }
-        f.*.stack_size = align_to(offset, 16);
+        // will this change the value only inside the fn
+        // or update the passed in objs
+        f.stack_size = align_to(offset, 16);
+        obj.* = Obj{ .kind = ObjKind.Function, .payload = ObjPayload{ .function = f } };
     }
 }
 
-fn find_local_var(ident: []const u8, locals: ObjList) ?*Obj {
+fn find_local_var(ident: []const u8, locals: VariableList) ?*Variable {
     for (locals.items) |l| {
         if (std.mem.eql(u8, l.name, ident)) {
             return l;
@@ -1054,7 +1054,7 @@ fn declaration(p: *ParseContext) !*Node {
         i += 1;
         var top = s.top();
         var typ = try declarator(p, base_type);
-        var identifier = try Obj.alloc_obj(p.alloc, typ.tok.get_ident(), typ);
+        var identifier = try Variable.alloc_obj(p.alloc, typ.tok.get_ident(), typ);
         try p.locals.insert(0, identifier);
         var lhs = try Node.from_ident(p.alloc, identifier, typ.tok);
 
@@ -1157,11 +1157,16 @@ fn type_suffix(p: *ParseContext, return_type: *Type) anyerror!*Type {
 }
 
 // create variables fn func parameters
-fn create_param_lvars(alloc: Allocator, params_decl_list: ?std.ArrayList(*Type), vars_list: *ObjList) !void {
+fn create_param_lvars(alloc: Allocator, params_decl_list: ?std.ArrayList(*Type), vars_list: *VariableList) !void {
     if (params_decl_list) |decl_list| {
         for (decl_list.items) |d| {
-            var arg = try Obj.alloc_obj(alloc, d.tok.get_ident(), d);
+            var arg = try Variable.alloc_obj(alloc, d.tok.get_ident(), d);
             try vars_list.insert(0, arg);
         }
     }
 }
+
+const ObjKind = enum { Function, Variable };
+const ObjPayload = union { variable: Variable, function: Function };
+const Obj = struct { kind: ObjKind, payload: ObjPayload };
+const ObjList = std.ArrayList(Obj);
