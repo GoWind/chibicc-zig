@@ -104,16 +104,30 @@ const Variable = struct {
     name: []u8,
     offset: usize = 0,
     typ: *Type,
+    //currently there are only 2 scopes : global or local
+    //in future, there might be more, so this might be something else
+    //apart from a boolean
+    is_local: bool = false,
     const Self = @This();
-    fn alloc_obj(alloc: Allocator, name: []const u8, ty: *Type) !*Variable {
+    fn alloc_obj(alloc: Allocator, name: []const u8, ty: *Type, local: bool) !*Variable {
         var obj = try alloc.create(Self);
         obj.offset = 0;
         obj.name = try alloc.dupe(u8, name);
         obj.typ = ty;
+        obj.is_local = local;
         return obj;
     }
+    fn localVar(alloc: Allocator, name: []const u8, ty: *Type) !*Variable {
+        var variable = try alloc.create(Self);
+        variable.* = Self{ .offset = 0, .name = try alloc.dupe(u8, name), .typ = ty, .is_local = true };
+        return variable;
+    }
+    fn globalVar(alloc: Allocator, name: []const u8, ty: *Type) !*Variable {
+        var variable = try alloc.create(Self);
+        variable.* = Self{ .offset = 0, .name = try alloc.dupe(u8, name), .typ = ty, .is_local = false };
+        return variable;
+    }
 };
-// List of variables that we have encountered so far in our C code
 const VariableList = std.ArrayList(*Variable);
 
 pub const Node = struct {
@@ -346,7 +360,7 @@ fn primary(p: *ParseContext) anyerror!*Node {
                     return fncall(p);
                 }
                 var variable: *Variable = undefined;
-                if (find_local_var(v.ptr, p.locals)) |local_var| {
+                if (findVar(p, v.ptr)) |local_var| {
                     variable = local_var;
                 } else {
                     panic("Undefined variable {s}\n", .{v.ptr});
@@ -617,11 +631,12 @@ fn compound_statement(p: *ParseContext) anyerror!*Node {
     stream.advance();
     return compound_stmt_node;
 }
+
 //declarator type-suffix "{" compound_stmt
 pub fn function(p: *ParseContext, return_typ: *Type) !void {
     var typ = try declarator(p, return_typ);
     // p.locals must always be empty before this
-    var param_vars = std.ArrayList(*Variable).init(p.alloc);
+    var param_vars = VariableList.init(p.alloc);
     try create_param_lvars(p.alloc, typ.params, &param_vars);
     for (param_vars.items) |param| {
         try p.locals.insert(0, param);
@@ -633,14 +648,34 @@ pub fn function(p: *ParseContext, return_typ: *Type) !void {
     var f = Function{ .stack_size = 0, .name = Token.get_ident(typ.tok), .fnbody = fn_statements, .locals = p.locals, .params = param_vars };
     try p.globals.insert(0, Obj{ .kind = ObjKind.Function, .payload = ObjPayload{ .function = f } });
 }
+
+pub fn global_variable(p: *ParseContext, base_type: *Type) !void {
+    var variables = VariableList.init(p.alloc);
+    var s = p.stream;
+    while (s.consume(&SEMICOLON) != true) {
+        if (variables.items.len > 0) {
+            s.skip(&COMMA);
+        }
+        var variable_type = try declarator(p, base_type);
+        try variables.insert(0, try Variable.globalVar(p.alloc, variable_type.tok.get_ident(), variable_type));
+    }
+    for (variables.items) |v| {
+        try p.globals.insert(0, Obj{ .kind = ObjKind.Variable, .payload = ObjPayload{ .variable = v } });
+    }
+    _ = variables.moveToUnmanaged();
+}
 pub fn parse(s: *Stream, alloc: Allocator) !std.ArrayList(Obj) {
     // Should `locals` also be ObjList or can it just be a VariableList (ie) can C have nested structs and functions ?
     var parse_context = ParseContext{ .stream = s, .alloc = alloc, .locals = VariableList.init(alloc), .globals = ObjList.init(alloc) };
     while (!s.is_eof()) {
         var decl = declspec(&parse_context);
-        try function(&parse_context, decl);
-        //reset list of local variables for each function
-        _ = parse_context.locals.moveToUnmanaged();
+        if (lookahead_is_function(&parse_context)) {
+            try function(&parse_context, decl);
+            //reset list of local variables for each function
+            _ = parse_context.locals.moveToUnmanaged();
+        } else {
+            try global_variable(&parse_context, decl);
+        }
     }
     return parse_context.globals;
 }
@@ -662,9 +697,16 @@ const fn_epilogue =
 fn gen_addr(node: *Node, ctx: *CodegenContext) !void {
     switch (node.kind) {
         NodeKind.Var => {
-            var offset = node.variable.?.offset;
-            try stdout.writer().print(";; variable {s} at offset {}\n", .{ node.variable.?.name, offset });
-            try stdout.writer().print("add x0, x29, #-{}\n", .{offset});
+            var variable = node.variable.?;
+            if (variable.is_local) {
+                var offset = node.variable.?.offset;
+                try stdout.writer().print(";; variable {s} at offset {}\n", .{ node.variable.?.name, offset });
+                try stdout.writer().print("add x0, x29, #-{}\n", .{offset});
+            } else {
+                try stdout.writer().print(";; loading global variable {s}'s addr at x0\n", .{variable.name});
+                try stdout.writer().print("adrp x0, {s}@PAGE\n", .{variable.name});
+                try stdout.writer().print("add x0, x0, {s}@PAGEOFF\n", .{variable.name});
+            }
         },
         // I don't know how we can pass a node of type `deref` to gen_addr yet.
         // Feels wrong, but maybe, it is for something like **x or ***x and so on ?
@@ -867,11 +909,12 @@ fn gen_stmt(n: *Node, ctx: *CodegenContext) !void {
     }
 }
 const CodegenContext = struct { current_func: Function, branch_count: u32 = 0, stack_depth: usize = 0 };
-pub fn codegen(objs: std.ArrayList(Obj)) !void {
+pub fn emit_text(objs: std.ArrayList(Obj)) !void {
     assign_lvar_offsets(objs);
     var stdout_writer = stdout.writer();
 
-    try stdout_writer.print(" .globl _main\n.align 2\n", .{});
+    try stdout_writer.print(" .globl _main\n", .{});
+    try stdout_writer.print(".text\n.align 4\n", .{});
 
     for (objs.items) |*obj| {
         if (obj.kind != ObjKind.Function) {
@@ -880,7 +923,6 @@ pub fn codegen(objs: std.ArrayList(Obj)) !void {
         var f = obj.payload.function;
         var codegen_ctx = CodegenContext{ .current_func = f };
         try stdout_writer.print(".globl _{s}\n", .{f.name});
-        try stdout_writer.print(".text\n", .{});
         try stdout_writer.print("_{s}:\n", .{f.name});
 
         try stdout_writer.print("{s}\n", .{fn_prologue});
@@ -934,6 +976,21 @@ fn find_local_var(ident: []const u8, locals: VariableList) ?*Variable {
     return null;
 }
 
+fn findVar(p: *ParseContext, ident: []const u8) ?*Variable {
+    if (find_local_var(ident, p.locals)) |v| {
+        return v;
+    }
+    for (p.globals.items) |g| {
+        if (g.kind != ObjKind.Variable) {
+            continue;
+        }
+        if (std.mem.eql(u8, ident, g.payload.variable.name)) {
+            return g.payload.variable;
+        }
+    }
+
+    return null;
+}
 fn update_branch_count(ctx: *CodegenContext) u32 {
     ctx.branch_count += 1;
     return ctx.branch_count;
@@ -1054,7 +1111,7 @@ fn declaration(p: *ParseContext) !*Node {
         i += 1;
         var top = s.top();
         var typ = try declarator(p, base_type);
-        var identifier = try Variable.alloc_obj(p.alloc, typ.tok.get_ident(), typ);
+        var identifier = try Variable.localVar(p.alloc, typ.tok.get_ident(), typ);
         try p.locals.insert(0, identifier);
         var lhs = try Node.from_ident(p.alloc, identifier, typ.tok);
 
@@ -1084,10 +1141,7 @@ fn declaration(p: *ParseContext) !*Node {
 //  not value or other types of expression nodes etc
 ////////////////
 
-// declarator = "*"* ident
-// (either a bare identifier or a series of derefs followed by an identifier)
-// (eg; x or *x or **y)
-// typ is the expected type of the `ident`
+// declarator = "*"* ident type_suffix
 fn declarator(p: *ParseContext, typ: *Type) !*Type {
     var stream = p.stream;
     var actual_type = typ;
@@ -1160,13 +1214,52 @@ fn type_suffix(p: *ParseContext, return_type: *Type) anyerror!*Type {
 fn create_param_lvars(alloc: Allocator, params_decl_list: ?std.ArrayList(*Type), vars_list: *VariableList) !void {
     if (params_decl_list) |decl_list| {
         for (decl_list.items) |d| {
-            var arg = try Variable.alloc_obj(alloc, d.tok.get_ident(), d);
+            var arg = try Variable.localVar(alloc, d.tok.get_ident(), d);
             try vars_list.insert(0, arg);
         }
     }
 }
 
 const ObjKind = enum { Function, Variable };
-const ObjPayload = union { variable: Variable, function: Function };
+const ObjPayload = union { variable: *Variable, function: Function };
 const Obj = struct { kind: ObjKind, payload: ObjPayload };
 const ObjList = std.ArrayList(Obj);
+
+fn emit_data(objs: ObjList) !void {
+    var stdout_writer = stdout.writer();
+    try stdout_writer.print(".data\n", .{});
+
+    for (objs.items) |*obj| {
+        if (obj.kind != ObjKind.Variable) {
+            continue;
+        }
+        var v = obj.payload.variable;
+        try stdout_writer.print(".globl {s}\n", .{v.name});
+        try stdout_writer.print("{s}: .skip {},0 \n", .{ v.name, v.typ.size });
+    }
+}
+
+pub fn codegen(objs: std.ArrayList(Obj)) !void {
+    assign_lvar_offsets(objs);
+    try emit_data(objs);
+    try emit_text(objs);
+}
+
+//lookahead functions parse the stream for a certain construct
+//and returns true if the construct has been found ahead
+//WITHOUT consuming the stream
+//It does so by storing the current ctx (stream idx), looking ahead for a construct
+//and restoring the current ctx
+fn lookahead_is_function(p: *ParseContext) bool {
+    var s = p.stream;
+    if (s.top().equal(&SEMICOLON)) {
+        return false;
+    }
+    var idx = s.idx;
+    var dummy = &IntBaseType;
+    // we try to parse as if the token contains a
+    // declarator of something and then check if it is a fn
+    dummy = declarator(p, dummy) catch return false;
+    p.*.stream.idx = idx;
+    return dummy.kind == TypeKind.Func;
+}
