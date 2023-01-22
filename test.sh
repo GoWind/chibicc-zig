@@ -1,6 +1,6 @@
 #!/bin/bash
 zig build || exit
-gcc -c tmp2.c
+zig cc -c tmp2.c
 assert() {
   expected="$1"
   input="$2"
