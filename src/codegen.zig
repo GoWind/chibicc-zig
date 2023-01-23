@@ -38,6 +38,8 @@ pub const RSQ_BRACK = Token{ .punct = .{ .ptr = span(all_valid_chars[40..41]) } 
 
 pub const RETURN = Token{ .keyword = .{ .ptr = span("return") } };
 pub const INT = Token{ .keyword = .{ .ptr = span("int") } };
+pub const CHAR = Token{ .keyword = .{ .ptr = span("char") } };
+
 pub const SIZEOF = Token{ .keyword = .{ .ptr = span("sizeof") } };
 
 // ** AST Generation ** //
@@ -47,7 +49,7 @@ pub const SIZEOF = Token{ .keyword = .{ .ptr = span("sizeof") } };
 // but in `while`, we disregard `inc`
 const NodeKind = enum { Add, Sub, Mul, Div, Unary, Num, Eq, Neq, Lt, Lte, ExprStmt, Assign, Var, Ret, Block, If, For, Addr, Deref, Funcall };
 
-const TypeKind = enum { Int, Ptr, Func, Array };
+const TypeKind = enum { Char, Int, Ptr, Func, Array };
 // Type information about variables
 const Type = struct {
     kind: TypeKind,
@@ -69,6 +71,7 @@ const Type = struct {
     const Self = @This();
     pub fn func_type(alloc: Allocator, return_type: *const Self) !*Type {
         var fn_type = try alloc.create(Self);
+        fn_type.kind = TypeKind.Func;
         fn_type.return_type = return_type;
         return fn_type;
     }
@@ -93,11 +96,21 @@ const Type = struct {
         array_type.* = .{ .base = base, .size = base.size * len, .kind = TypeKind.Array, .array_len = len, .tok = tok };
         return array_type;
     }
+
+    fn isTypename(tok: *const Token) bool {
+        return tok.equal(&CHAR) or tok.equal(&INT);
+    }
+
+    // is_integer in chibicc
+    fn isIntegerLikeType(self: *const Self) bool {
+        return self.kind == TypeKind.Int or self.kind == TypeKind.Char;
+    }
 };
 
 // this should be a const, but that makes the pointer to this a *const Type and
 // it is very annoying to change aftewards, so guess I will deal with this later
 var IntBaseType = Type{ .kind = TypeKind.Int, .base = null, .tok = &INT, .params = null, .size = 8 };
+var CharBaseType = Type{ .kind = TypeKind.Char, .base = null, .tok = &CHAR, .params = null, .size = 1 };
 
 // A variable in our C code
 const Variable = struct {
@@ -249,7 +262,7 @@ fn new_add(p: *ParseContext, lhs: ?*Node, rhs: ?*Node, tok: *Token) !*Node {
     if (rhs) |r|
         add_type(p.alloc, r);
 
-    if (lhs.?.n_type.?.kind == TypeKind.Int and rhs.?.n_type.?.kind == TypeKind.Int) {
+    if (lhs.?.n_type.?.isIntegerLikeType() and rhs.?.n_type.?.isIntegerLikeType()) {
         var add_node = try Node.from_binary(p.alloc, NodeKind.Add, lhs, rhs, tok);
         return add_node;
     }
@@ -263,7 +276,7 @@ fn new_add(p: *ParseContext, lhs: ?*Node, rhs: ?*Node, tok: *Token) !*Node {
     // change num + ptr to ptr + num
     var l: ?*Node = lhs;
     var r: ?*Node = rhs;
-    if (lhs.?.n_type.?.base == null and rhs.?.n_type.?.base != null) {
+    if (lhs.?.n_type.?.isIntegerLikeType() and rhs.?.n_type.?.base != null) {
         l = rhs;
         r = lhs;
     }
@@ -284,7 +297,7 @@ fn new_sub(p: *ParseContext, lhs: ?*Node, rhs: ?*Node, tok: *Token) !*Node {
     if (lhs) |l| add_type(p.alloc, l);
     if (rhs) |r| add_type(p.alloc, r);
 
-    if (lhs.?.n_type.?.kind == TypeKind.Int and rhs.?.n_type.?.kind == TypeKind.Int) {
+    if (lhs.?.n_type.?.isIntegerLikeType() and rhs.?.n_type.?.isIntegerLikeType()) {
         var sub_node = try Node.from_binary(p.alloc, NodeKind.Sub, lhs, rhs, tok);
         return sub_node;
     }
@@ -293,7 +306,7 @@ fn new_sub(p: *ParseContext, lhs: ?*Node, rhs: ?*Node, tok: *Token) !*Node {
     var stride_node = try Node.from_num(p.alloc, @intCast(i32, stride_val), tok); // For now we recognize only 8 byte integers
 
     // ptr - num
-    if (lhs.?.n_type.?.base != null and rhs.?.n_type.?.kind == TypeKind.Int) {
+    if (lhs.?.n_type.?.base != null and rhs.?.n_type.?.isIntegerLikeType()) {
         var new_rhs = try Node.from_binary(p.alloc, NodeKind.Mul, rhs, stride_node, tok);
         // we are creating a *new* rhs, so we need to add type info
         // to the new rhs node
@@ -617,7 +630,7 @@ fn compound_statement(p: *ParseContext) anyerror!*Node {
     var stream = p.stream;
     var s_top = stream.top();
     while (stream.top().equal(&RBRACE) == false) {
-        var statement = if (stream.top().equal(&INT)) try declaration(p) else try stmt(p);
+        var statement = if (Type.isTypename(stream.top())) try declaration(p) else try stmt(p);
         add_type(p.alloc, statement);
         if (first_stmt == null) {
             first_stmt = statement;
@@ -720,6 +733,8 @@ fn gen_addr(node: *Node, ctx: *CodegenContext) !void {
 }
 var depth: u32 = 0;
 var args_regs = [_][]const u8{ "x0", "x1", "x2", "x3", "x4", "x5", "x6", "x7" };
+var args_regs_32 = [_][]const u8{ "w0", "w1", "w2", "w3", "w4", "w5", "w6", "w7" };
+
 // ** Code-Generation ** //
 fn push(ctx: *CodegenContext) !void {
     ctx.stack_depth += 1;
@@ -743,13 +758,21 @@ fn load(ty: *const Type) anyerror!void {
         // the first element of the array in C" occurs.
         return;
     }
-    try stdout.writer().print("ldr x0, [x0]\n", .{});
+    if (ty.size == 1) {
+        try stdout.writer().print("ldr w0, [x0]\n", .{});
+    } else {
+        try stdout.writer().print("ldr x0, [x0]\n", .{});
+    }
 }
 
 // Store x0 to an address that the stack top is pointing to.
-fn store(reg: []const u8, ctx: *CodegenContext) anyerror!void {
+fn store(reg: []const u8, ty: *const Type, ctx: *CodegenContext) anyerror!void {
     try pop(reg, ctx);
-    try stdout.writer().print("str x0, [x2]\n", .{});
+    if (ty.size == 1) {
+        try stdout.writer().print("strb w0, [{s}]\n", .{reg});
+    } else {
+        try stdout.writer().print("str x0, [{s}]\n", .{reg});
+    }
 }
 // Code generation
 // Depending on the kind of node, the state of registers might
@@ -774,7 +797,7 @@ pub fn gen_expr(node: *Node, ctx: *CodegenContext) anyerror!void {
         try gen_addr(node.lhs.?, ctx); //x0 has addr of variable
         try push(ctx); //push x0 into stack
         try gen_expr(node.rhs.?, ctx); // x0 now has value
-        try store(span("x2"), ctx);
+        try store(span("x2"), node.n_type.?, ctx);
     } else if (node.kind == NodeKind.Funcall) {
         var args_len: usize = 0;
         for (node.fn_args.?.items) |arg| {
@@ -931,7 +954,11 @@ pub fn emit_text(objs: std.ArrayList(Obj)) !void {
 
         try stdout_writer.print("sub sp, sp, #{}\n", .{f.stack_size});
         for (f.params.items) |p, i| {
-            try stdout_writer.print("str {s}, [x29, -{}]\n", .{ args_regs[i], p.offset });
+            if (p.typ.size == 1) {
+                try stdout_writer.print("strb {s}, [x29, -{}]\n", .{ args_regs_32[i], p.offset });
+            } else {
+                try stdout_writer.print("str {s}, [x29, -{}]\n", .{ args_regs[i], p.offset });
+            }
         }
 
         try gen_stmt(f.fnbody, &codegen_ctx);
@@ -1081,10 +1108,14 @@ fn add_type(ally: Allocator, n: *Node) void {
     }
 }
 
-// declspec = "int"
+// declspec = "char" | "int"
 // returns a `Type` from the stream
 fn declspec(p: *ParseContext) *Type {
     var stream = p.stream;
+    if (stream.top().equal(&CHAR)) {
+        stream.advance();
+        return &CharBaseType;
+    }
     stream.skip(&INT);
     return &IntBaseType;
 }
@@ -1191,7 +1222,9 @@ fn type_suffix(p: *ParseContext, return_type: *Type) anyerror!*Type {
     var s = p.stream;
     if (s.top().equal(&LPAREN)) {
         s.advance(); // consume "("
-        return try func_params(p, return_type);
+        // return try func_params(p, return_type);
+        var fn_p = try func_params(p, return_type);
+        return fn_p;
     } else if (s.top().equal(&LSQ_BRACK)) {
         var tok = s.top();
         s.advance();
@@ -1261,5 +1294,6 @@ fn lookahead_is_function(p: *ParseContext) bool {
     // declarator of something and then check if it is a fn
     dummy = declarator(p, dummy) catch return false;
     p.*.stream.idx = idx;
+
     return dummy.kind == TypeKind.Func;
 }

@@ -3,7 +3,7 @@ const Allocator = std.mem.Allocator;
 const span = std.mem.span;
 const panic = std.debug.panic;
 const ascii = std.ascii;
-const keywords = [_][]const u8{ "return", "if", "else", "for", "while", "int", "sizeof" };
+const keywords = [_][]const u8{ "return", "if", "else", "for", "while", "int", "sizeof", "char" };
 pub const TokenKind = enum { punct, num, eof, ident, keyword };
 pub const Token = union(TokenKind) {
     const Self = @This();
@@ -27,7 +27,7 @@ pub const Token = union(TokenKind) {
         }
         return false;
     }
-    pub fn equal(self: *Self, other: *const Token) bool {
+    pub fn equal(self: *const Self, other: *const Token) bool {
         if (std.mem.eql(u8, @tagName(self.*), @tagName(other.*)) == false) {
             return false;
         }
@@ -50,7 +50,7 @@ pub const Token = union(TokenKind) {
         }
     }
 
-    fn equal_puncts(self: *Self, other: *const Token) bool {
+    fn equal_puncts(self: *const Self, other: *const Token) bool {
         var struct_self = @field(self, "punct");
         var struct_other = @field(other, "punct");
         var ptr_self = @field(struct_self, "ptr");
@@ -58,7 +58,7 @@ pub const Token = union(TokenKind) {
         return std.mem.eql(u8, ptr_self, ptr_other);
     }
 
-    fn equal_idents(self: *Self, other: *const Token) bool {
+    fn equal_idents(self: *const Self, other: *const Token) bool {
         var struct_self = @field(self, "ident");
         var struct_other = @field(other, "ident");
         var ptr_self = @field(struct_self, "ptr");
@@ -66,7 +66,7 @@ pub const Token = union(TokenKind) {
         return std.mem.eql(u8, ptr_self, ptr_other);
     }
 
-    fn equal_nums(self: *Self, other: *const Token) bool {
+    fn equal_nums(self: *const Self, other: *const Token) bool {
         var struct_self = @field(self, "num");
         var struct_other = @field(other, "num");
         var val_self = @field(struct_self, "val");
@@ -95,6 +95,7 @@ pub const Token = union(TokenKind) {
             },
         }
     }
+
     pub fn format(self: Self, comptime _: []const u8, _: std.fmt.FormatOptions, out_stream: anytype) !void {
         switch (self) {
             TokenKind.num => |v| {
