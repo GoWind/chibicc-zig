@@ -14,7 +14,7 @@ fn debug_token_stream(s: *tokenizer.Stream) void {
     while (s.is_eof() == false) {
         var top = s.top();
         std.debug.print("{?}\n", .{top});
-        s.consume();
+        s.advance();
     }
     s.*.idx = 0;
 }

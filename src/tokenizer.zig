@@ -1,123 +1,12 @@
 const std = @import("std");
+const data = @import("data.zig");
+const Token = data.Token;
+const TokenList = data.TokenList;
+const TokenKind = data.TokenKind;
 const Allocator = std.mem.Allocator;
 const span = std.mem.span;
 const panic = std.debug.panic;
 const ascii = std.ascii;
-const keywords = [_][]const u8{ "return", "if", "else", "for", "while", "int", "sizeof", "char" };
-pub const TokenKind = enum { punct, num, eof, ident, keyword };
-pub const Token = union(TokenKind) {
-    const Self = @This();
-    punct: struct {
-        ptr: []const u8,
-    },
-    num: struct { val: i32 },
-    eof: void,
-    ident: struct {
-        ptr: []const u8,
-    },
-    keyword: struct {
-        ptr: []const u8,
-    },
-
-    pub fn isKeyword(word: []u8) bool {
-        for (keywords) |keyword| {
-            if (std.mem.eql(u8, word, keyword)) {
-                return true;
-            }
-        }
-        return false;
-    }
-    pub fn equal(self: *const Self, other: *const Token) bool {
-        if (std.mem.eql(u8, @tagName(self.*), @tagName(other.*)) == false) {
-            return false;
-        }
-
-        switch (self.*) {
-            TokenKind.num => {
-                return self.equal_nums(other);
-            },
-            TokenKind.punct => {
-                return self.equal_puncts(other);
-            },
-            TokenKind.keyword => |v| {
-                var struct_other = @field(other, "keyword");
-                var keyword = @field(struct_other, "ptr");
-                return std.mem.eql(u8, v.ptr, keyword);
-            },
-            else => {
-                panic("We shouldn't be here", .{});
-            },
-        }
-    }
-
-    fn equal_puncts(self: *const Self, other: *const Token) bool {
-        var struct_self = @field(self, "punct");
-        var struct_other = @field(other, "punct");
-        var ptr_self = @field(struct_self, "ptr");
-        var ptr_other = @field(struct_other, "ptr");
-        return std.mem.eql(u8, ptr_self, ptr_other);
-    }
-
-    fn equal_idents(self: *const Self, other: *const Token) bool {
-        var struct_self = @field(self, "ident");
-        var struct_other = @field(other, "ident");
-        var ptr_self = @field(struct_self, "ptr");
-        var ptr_other = @field(struct_other, "ptr");
-        return std.mem.eql(u8, ptr_self, ptr_other);
-    }
-
-    fn equal_nums(self: *const Self, other: *const Token) bool {
-        var struct_self = @field(self, "num");
-        var struct_other = @field(other, "num");
-        var val_self = @field(struct_self, "val");
-        var val_other = @field(struct_other, "val");
-        return val_self == val_other;
-    }
-
-    pub fn get_ident(tok: *const Self) []const u8 {
-        switch (tok.*) {
-            TokenKind.ident => |v| {
-                return v.ptr;
-            },
-            else => {
-                panic("expected .ident token, got {?}\n", .{tok});
-            },
-        }
-    }
-
-    pub fn getNumber(tok: *const Self) i32 {
-        switch (tok.*) {
-            TokenKind.num => |v| {
-                return v.val;
-            },
-            else => {
-                panic("expected num token, got {?}\n", .{tok});
-            },
-        }
-    }
-
-    pub fn format(self: Self, comptime _: []const u8, _: std.fmt.FormatOptions, out_stream: anytype) !void {
-        switch (self) {
-            TokenKind.num => |v| {
-                try std.fmt.format(out_stream, "TokenKind.num {}\n", .{v.val});
-            },
-            TokenKind.punct => |v| {
-                try std.fmt.format(out_stream, "TokenKind.punct: '{s}'\n", .{v.ptr});
-            },
-            TokenKind.eof => {
-                try std.fmt.format(out_stream, "TokenKind.eof \n", .{});
-            },
-            TokenKind.ident => |v| {
-                try std.fmt.format(out_stream, "TokenKind.ident : '{s}'\n", .{v.ptr});
-            },
-            TokenKind.keyword => |v| {
-                try std.fmt.format(out_stream, "TokenKind.keyword {s}\n", .{v.ptr});
-            },
-        }
-    }
-};
-pub const TokenList = std.ArrayList(Token);
-
 pub const Stream = struct {
     const Self = @This();
     ts: TokenList,
@@ -142,7 +31,7 @@ pub const Stream = struct {
             return true;
         }
         switch (self.ts.items[self.idx]) {
-            TokenKind.eof => {
+            TokenKind.Eof => {
                 return true;
             },
             else => {
@@ -201,8 +90,11 @@ pub fn tokenize(stream_p: *[*:0]u8, list: *TokenList) !void {
         } else if (ascii.isDigit(stream[0]) == true) {
             // Notice that we are mutating `stream` here
             var number = strtol(&stream);
-            try list.append(Token{ .num = .{ .val = number.? } });
+            try list.append(Token{ .Num = .{ .val = number.? } });
             // Identifiers and Keywords
+        } else if (stream[0] == '"') {
+            var literal = try readStringLiteral(&stream);
+            try list.append(Token{ .StringLiteral = .{ .ptr = literal } });
         } else if (isIdent1(stream[0])) {
             var nextIdx: usize = 1;
             while (isIdent2(stream[0 + nextIdx])) {
@@ -213,21 +105,20 @@ pub fn tokenize(stream_p: *[*:0]u8, list: *TokenList) !void {
             // of if there is a clear advantage to converting idents to keywords
             // later once all tokens are scanned
             var t = if (Token.isKeyword(stream[0..nextIdx]))
-                Token{ .keyword = .{ .ptr = stream[0..nextIdx] } }
+                Token{ .Keyword = .{ .ptr = stream[0..nextIdx] } }
             else
-                Token{ .ident = .{ .ptr = stream[0..nextIdx] } };
+                Token{ .Ident = .{ .ptr = stream[0..nextIdx] } };
             try list.append(t);
             stream += nextIdx;
-            // Operators
         } else if (readPunct(span(stream)) > 0) {
             var punct_len = readPunct(span(stream));
-            try list.append(Token{ .punct = .{ .ptr = stream[0..punct_len] } });
+            try list.append(Token{ .Punct = .{ .ptr = stream[0..punct_len] } });
             stream += punct_len;
         } else {
             panic("Invalid token {c} from {s}\n", .{ stream[0], stream });
         }
     }
-    try list.append(Token.eof);
+    try list.append(Token.Eof);
 }
 
 // A slight variation of the strtol func in C std lib.
@@ -261,7 +152,20 @@ fn strtol(yp: *[*:0]const u8) ?i32 {
     yp.* = y;
     return acc * sign;
 }
-
+// start is the index of the first "
+fn readStringLiteral(sp: *[*:0]const u8) ![]const u8 {
+    var start = sp.*;
+    const s = start + 1;
+    var idx: usize = 0;
+    while (s[idx] != '"') : (idx += 1) {
+        if (s[idx] == '\n' or s[idx] == 0) {
+            std.debug.panic("Unclosed literal newline or null char at {s}\n", .{s[idx - 2 .. idx]});
+        }
+    }
+    //idx now points to the trailing "
+    sp.* = s + idx + 1;
+    return s[0..idx];
+}
 pub fn text_to_stream(text: *[*:0]u8, alloc: Allocator) !Stream {
     var tlist = TokenList.init(alloc);
     try tokenize(text, &tlist);
