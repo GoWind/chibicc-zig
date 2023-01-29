@@ -80,7 +80,7 @@ pub const Stream = struct {
 // Takes a program string and a TokenList as input and
 // populates the TokenList with tokens from the program string
 // Do not use the TokenList directly. Use the Stream instead.
-pub fn tokenize(stream_p: *[*:0]u8, list: *TokenList) !void {
+pub fn tokenize(stream_p: *[*:0]u8, list: *TokenList, alloc: Allocator) !void {
     var stream = stream_p.*;
     while (stream[0] != 0) {
         if (ascii.isSpace(stream[0]) == true) {
@@ -94,7 +94,9 @@ pub fn tokenize(stream_p: *[*:0]u8, list: *TokenList) !void {
             // Identifiers and Keywords
         } else if (stream[0] == '"') {
             var literal = try readStringLiteral(&stream);
-            try list.append(Token{ .StringLiteral = .{ .ptr = literal } });
+            var buffer = try alloc.alloc(u8, literal.len);
+            var skippedLiteral = skipEscapedChars(literal, buffer);
+            try list.append(Token{ .StringLiteral = .{ .ptr = skippedLiteral } });
         } else if (isIdent1(stream[0])) {
             var nextIdx: usize = 1;
             while (isIdent2(stream[0 + nextIdx])) {
@@ -168,7 +170,7 @@ fn readStringLiteral(sp: *[*:0]const u8) ![]const u8 {
 }
 pub fn text_to_stream(text: *[*:0]u8, alloc: Allocator) !Stream {
     var tlist = TokenList.init(alloc);
-    try tokenize(text, &tlist);
+    try tokenize(text, &tlist, alloc);
     var stream = Stream.init_stream(tlist);
     return stream;
 }
@@ -196,4 +198,36 @@ fn isIdent1(c: u8) bool {
 
 fn isIdent2(c: u8) bool {
     return isIdent1(c) or '0' <= c and c <= '9';
+}
+
+fn readEscapedChar(c: u8) u8 {
+    var escaped_char: u8 = switch (c) {
+        'a' => 0x7,
+        'b' => 0x8,
+        't' => '\t',
+        'n' => '\n',
+        'v' => 0x0b,
+        'f' => 0x0c,
+        'r' => 0x0d,
+        // GNU specific extension
+        'e' => 0x1b,
+        else => c,
+    };
+    return escaped_char;
+}
+
+fn skipEscapedChars(source: []const u8, dest: []u8) []const u8 {
+    var input_idx: usize = 0;
+    var output_idx: usize = 0;
+    while (input_idx < source.len) {
+        if (source[input_idx] == '\\') {
+            dest[output_idx] = readEscapedChar(source[input_idx + 1]);
+            input_idx += 2;
+        } else {
+            dest[output_idx] = source[input_idx];
+            input_idx += 1;
+        }
+        output_idx += 1;
+    }
+    return dest[0..output_idx];
 }
