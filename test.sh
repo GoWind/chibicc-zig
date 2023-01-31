@@ -19,6 +19,10 @@ assert() {
   fi
 }
 
+assert 0 'int main() { return "\0"[0]; }'
+assert 16 'int main() { return "\20"[0]; }'
+assert 65 'int main() { return "\101"[0]; }'
+assert 104 'int main() { return "\1500"[0]; }'
 assert 7 'int main() { return "\a"[0]; }'
 assert 8 'int main() { return "\b"[0]; }'
 assert 9 'int main() { return "\t"[0]; }'

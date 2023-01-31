@@ -200,20 +200,35 @@ fn isIdent2(c: u8) bool {
     return isIdent1(c) or '0' <= c and c <= '9';
 }
 
-fn readEscapedChar(c: u8) u8 {
-    var escaped_char: u8 = switch (c) {
-        'a' => 0x7,
-        'b' => 0x8,
-        't' => '\t',
-        'n' => '\n',
-        'v' => 0x0b,
-        'f' => 0x0c,
-        'r' => 0x0d,
+fn readEscapedChar(source: []const u8) [2]u8 {
+    var c = source[0];
+    // include the leading \ as also reaed (\a = 2)
+    var one: u8 = 2;
+    var escaped_char: [2]u8 = switch (c) {
+        'a' => [_]u8{one, 0x7},
+        'b' => [_]u8{one, 0x8},
+        't' => [_]u8{one, '\t'},
+        'n' => [_]u8{one, '\n'},
+        'v' => [_]u8{one, 0x0b},
+        'f' => [_]u8{one, 0x0c},
+        'r' => [_]u8{one, 0x0d},
         // GNU specific extension
-        'e' => 0x1b,
-        else => c,
+        'e' => [_]u8{one, 0x1b},
+        else => if(source[0] >= '0' and source[0] <= '7') readOctalChar(source) else [_]u8{one, c}
     };
     return escaped_char;
+}
+
+fn readOctalChar(source: []const u8) [2]u8 {
+    // read upto 3 digits. digits must be between 0 and 7
+    var idx: usize = 0;
+    var c: u8 = 0;
+    while(idx < 3 and idx < source.len): (idx += 1) {
+        if(source[idx] >= '0' and source[idx] <= '7') {
+            c = (c << 3) + source[idx] - '0';
+        }
+    }
+    return [_]u8{@intCast(u8, idx), c}; 
 }
 
 fn skipEscapedChars(source: []const u8, dest: []u8) []const u8 {
@@ -221,8 +236,9 @@ fn skipEscapedChars(source: []const u8, dest: []u8) []const u8 {
     var output_idx: usize = 0;
     while (input_idx < source.len) {
         if (source[input_idx] == '\\') {
-            dest[output_idx] = readEscapedChar(source[input_idx + 1]);
-            input_idx += 2;
+                var escaped_char = readEscapedChar(source[input_idx + 1..]);
+                dest[output_idx] = escaped_char[1];
+                input_idx += escaped_char[0];
         } else {
             dest[output_idx] = source[input_idx];
             input_idx += 1;
