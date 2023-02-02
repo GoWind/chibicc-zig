@@ -23,7 +23,7 @@ fn printLine(comptime format: []const u8, args: anytype) !void {
 // Code emitter
 // For and while use the same kind
 // but in `while`, we disregard `inc`
-const NodeKind = enum { Add, Sub, Mul, Div, Unary, Num, Eq, Neq, Lt, Lte, ExprStmt, Assign, Var, Ret, Block, If, For, Addr, Deref, Funcall };
+const NodeKind = enum { Add, Sub, Mul, Div, Unary, Num, Eq, Neq, Lt, Lte, ExprStmt, Assign, Var, Ret, Block, If, For, Addr, Deref, Funcall, StatementExpr };
 
 // this should be a const, but that makes the pointer to this a *const Type and
 // it is very annoying to change aftewards, so guess I will deal with this later
@@ -70,7 +70,7 @@ pub const Node = struct {
     next: ?*Node = null, // Compound Statement
     lhs: ?*Node = null,
     rhs: ?*Node = null,
-    body: ?*Node = null, // For Blocks
+    body: ?*Node = null, // For Blocks and Expression Statements
     // If else blocks, then is also used with `for`
     cond: ?*Node = null,
     then: ?*Node = null,
@@ -119,6 +119,11 @@ pub const Node = struct {
         return self;
     }
 
+    pub fn from_stmt_expr(alloc: Allocator, body: ?*Node, tok: ?*Token) !*Self {
+        var self = try alloc.create(Self);
+        self.* = .{ .kind = NodeKind.StatementExpr, .body = body, .tok = tok };
+        return self;
+    }
     pub fn from_if_stmt(alloc: Allocator, cond: ?*Node, then: ?*Node, els: ?*Node, tok: ?*Token) !*Self {
         var self = try alloc.create(Self);
         self.* = .{ .kind = NodeKind.If, .cond = cond, .then = then, .els = els, .tok = tok };
@@ -168,6 +173,9 @@ pub const Node = struct {
             },
             NodeKind.Funcall => {
                 try std.fmt.format(out_stream, "Funcall Node with name {s} \n", .{self.fn_name});
+            },
+            NodeKind.StatementExpr => {
+                try std.fmt.format(out_stream, "Statement Expression starting at {?} {?}\n", .{ self.tok, self.body });
             },
         }
     }
@@ -265,7 +273,8 @@ fn fncall(p: *ParseContext) !*Node {
     return fn_node;
 }
 
-// primary =      '(' expr ')'
+// primary =   '(' '{' stmt+ '}' ')'
+//             |   '(' expr ')'
 //             |  ident func-args?
 //             |   string literal
 //             |  number
@@ -274,11 +283,22 @@ fn primary(p: *ParseContext) anyerror!*Node {
     var s = p.stream;
     var top_token = s.top();
     if (top_token.equal(&data.LEFT_PAREN)) {
-        // var top_idx = s.pos();
-        s.advance();
-        var expression = try expr(p);
-        s.skip(&data.RIGHT_PAREN);
-        return expression;
+        var next_idx = s.pos() + 1;
+        if (s.ts.items[next_idx].equal(&data.LBRACE)) {
+            s.advance();
+            s.advance(); // consume '(' and '{'
+            var stmt_expr_tok = s.top();
+            var compound_stmt_node = try compound_statement(p);
+            var stmt_expr_node = try Node.from_stmt_expr(p.alloc, compound_stmt_node.body, stmt_expr_tok);
+            s.skip(&data.RIGHT_PAREN);
+            return stmt_expr_node;
+        } else {
+            // var top_idx = s.pos();
+            s.advance();
+            var expression = try expr(p);
+            s.skip(&data.RIGHT_PAREN);
+            return expression;
+        }
     }
     if (top_token.equal(&data.SIZEOF)) {
         s.advance();
@@ -395,6 +415,7 @@ fn add(p: *ParseContext) !*Node {
         if ((stream_top.equal(&data.PLUS) == true) or (stream_top.equal(&data.MINUS) == true)) {
             var op = if (stream_top.equal(&data.PLUS)) NodeKind.Add else NodeKind.Sub;
             s.advance();
+
             var rhs = try mul(p);
             var expr_node = if (op == NodeKind.Add) try new_add(p, lhs, rhs, stream_top) else try new_sub(p, lhs, rhs, stream_top);
             lhs = expr_node;
@@ -554,7 +575,7 @@ fn stmt(p: *ParseContext) !*Node {
     }
 }
 
-// (declaration | stmt)* }
+// (declaration | stmt)* '}'
 fn compound_statement(p: *ParseContext) anyerror!*Node {
     var first_stmt: ?*Node = null;
     var it = first_stmt;
@@ -729,6 +750,12 @@ pub fn gen_expr(node: *Node, ctx: *CodegenContext) anyerror!void {
         try push(ctx); //push x0 into stack
         try gen_expr(node.rhs.?, ctx); // x0 now has value
         try store(span("x2"), node.n_type.?, ctx);
+    } else if (node.kind == NodeKind.StatementExpr) {
+        var maybe_body = node.body;
+        while (maybe_body) |body| {
+            try gen_stmt(body, ctx);
+            maybe_body = body.next;
+        }
     } else if (node.kind == NodeKind.Funcall) {
         var args_len: usize = 0;
         for (node.fn_args.?.items) |arg| {
@@ -750,6 +777,7 @@ pub fn gen_expr(node: *Node, ctx: *CodegenContext) anyerror!void {
         // function names with an `_`
         try printLine("bl _{s}", .{node.fn_name});
     } else {
+
         // Idea, gen_expr, returns which register the end value of that expr is in
         // we can then use this as an input into the subsequent Add, Sub, Mul, Div
         // instructions, instead of pushing and popping from stack
@@ -1030,6 +1058,19 @@ fn add_type(ally: Allocator, n: *Node) void {
                 panic("invalid pointer dereference {?}", .{n.lhs});
             }
             n.n_type = n.lhs.?.n_type.?.base;
+        },
+        NodeKind.StatementExpr => {
+            if (n.body) |b| {
+                var last_stmt = b;
+                while (last_stmt.next != null) {
+                    last_stmt = last_stmt.next.?;
+                }
+                if (last_stmt.kind == NodeKind.ExprStmt) {
+                    n.n_type = last_stmt.lhs.?.n_type;
+                }
+            } else {
+                panic("statement expression returning void is not supported\n", .{});
+            }
         },
         else => {
             // We just ignore all the other types of nodes
