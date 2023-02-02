@@ -200,21 +200,47 @@ fn isIdent2(c: u8) bool {
     return isIdent1(c) or '0' <= c and c <= '9';
 }
 
+fn hexValue(c: u8) u8 {
+    if (c >= '0' and c <= '9') {
+        return c - '0';
+    } else if (c >= 'a' and c <= 'z') {
+        return c - 'a' + 10;
+    } else if (c >= 'A' and c <= 'Z') {
+        return c - 'A' + 10;
+    } else {
+        unreachable;
+    }
+}
+fn readHexSequence(source: []const u8) [2]u8 {
+    var first = source[0];
+    if (!ascii.isHex(first)) {
+        panic("expect digit as first char in hex sequence, got {}\n", .{first});
+    }
+    var c: u8 = 0;
+    var idx: usize = 0;
+    while (idx < source.len and ascii.isHex(source[idx])) : (idx += 1) {
+        // we don't care about overflow as our string store 8-bit chars only
+
+        c = (c << 4) + hexValue(source[idx]);
+    }
+    return [_]u8{ @intCast(u8, idx), c };
+}
 fn readEscapedChar(source: []const u8) [2]u8 {
     var c = source[0];
     // include the leading \ as also reaed (\a = 2)
     var one: u8 = 2;
     var escaped_char: [2]u8 = switch (c) {
-        'a' => [_]u8{one, 0x7},
-        'b' => [_]u8{one, 0x8},
-        't' => [_]u8{one, '\t'},
-        'n' => [_]u8{one, '\n'},
-        'v' => [_]u8{one, 0x0b},
-        'f' => [_]u8{one, 0x0c},
-        'r' => [_]u8{one, 0x0d},
+        'a' => [_]u8{ one, 0x7 },
+        'b' => [_]u8{ one, 0x8 },
+        't' => [_]u8{ one, '\t' },
+        'n' => [_]u8{ one, '\n' },
+        'v' => [_]u8{ one, 0x0b },
+        'f' => [_]u8{ one, 0x0c },
+        'r' => [_]u8{ one, 0x0d },
         // GNU specific extension
-        'e' => [_]u8{one, 0x1b},
-        else => if(source[0] >= '0' and source[0] <= '7') readOctalChar(source) else [_]u8{one, c}
+        'e' => [_]u8{ one, 0x1b },
+        'x' => readHexSequence(source[1..]),
+        else => if (source[0] >= '0' and source[0] <= '7') readOctalChar(source) else [_]u8{ one, c },
     };
     return escaped_char;
 }
@@ -223,12 +249,12 @@ fn readOctalChar(source: []const u8) [2]u8 {
     // read upto 3 digits. digits must be between 0 and 7
     var idx: usize = 0;
     var c: u8 = 0;
-    while(idx < 3 and idx < source.len): (idx += 1) {
-        if(source[idx] >= '0' and source[idx] <= '7') {
+    while (idx < 3 and idx < source.len) : (idx += 1) {
+        if (source[idx] >= '0' and source[idx] <= '7') {
             c = (c << 3) + source[idx] - '0';
         }
     }
-    return [_]u8{@intCast(u8, idx), c}; 
+    return [_]u8{ @intCast(u8, idx), c };
 }
 
 fn skipEscapedChars(source: []const u8, dest: []u8) []const u8 {
@@ -236,9 +262,9 @@ fn skipEscapedChars(source: []const u8, dest: []u8) []const u8 {
     var output_idx: usize = 0;
     while (input_idx < source.len) {
         if (source[input_idx] == '\\') {
-                var escaped_char = readEscapedChar(source[input_idx + 1..]);
-                dest[output_idx] = escaped_char[1];
-                input_idx += escaped_char[0];
+            var escaped_char = readEscapedChar(source[input_idx + 1 ..]);
+            dest[output_idx] = escaped_char[1];
+            input_idx += escaped_char[0];
         } else {
             dest[output_idx] = source[input_idx];
             input_idx += 1;
