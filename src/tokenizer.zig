@@ -83,7 +83,16 @@ pub const Stream = struct {
 pub fn tokenize(stream_p: *[*:0]u8, list: *TokenList, alloc: Allocator) !void {
     var stream = stream_p.*;
     while (stream[0] != 0) {
-        if (ascii.isSpace(stream[0]) == true) {
+        if (stream[0] == '/' and stream[1] == '/') {
+            stream += 2;
+            while (stream[0] != '\n') : (stream += 1) {}
+        } else if (stream[0] == '/' and stream[1] == '*') {
+            stream += 2;
+            while (!(stream[0] == '*' and stream[1] == '/')) {
+                stream += 1;
+            }
+            stream += 2;
+        } else if (ascii.isSpace(stream[0]) == true) {
             stream += 1;
             continue;
             // Numbers
