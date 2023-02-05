@@ -273,3 +273,23 @@ fn skipEscapedChars(source: []const u8, dest: []u8) []const u8 {
     }
     return dest[0..output_idx];
 }
+
+pub fn readFile(alloc: Allocator, path: []const u8) ![]u8 {
+    var buffer: []u8 = undefined;
+    var max_size: usize = (2 << 16); // read upto a 64 kb file
+
+    if (std.mem.eql(u8, path, "-")) {
+        var stdin = std.io.getStdIn();
+        var reader = stdin.reader();
+        buffer = try reader.readAllAlloc(alloc, max_size);
+    } else {
+        var f = try std.fs.cwd().openFile(path, .{});
+        defer f.close();
+        buffer = try f.readToEndAlloc(alloc, max_size);
+    }
+    if (buffer[buffer.len - 1] != '\n') {
+        return try std.mem.concatWithSentinel(alloc, u8, &[_][]const u8{ buffer, "\n" }, 0);
+    } else {
+        return try std.mem.concatWithSentinel(alloc, u8, &[_][]const u8{ buffer, "" }, 0);
+    }
+}

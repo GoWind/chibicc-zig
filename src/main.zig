@@ -26,7 +26,8 @@ pub fn main() anyerror!void {
     var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer arena.deinit();
     var allocator = arena.allocator();
-    var token_stream = try tokenizer.text_to_stream(&std.os.argv[1], allocator);
+    var text = try tokenizer.readFile(allocator, std.mem.span(std.os.argv[1]));
+    var token_stream = try tokenizer.text_to_stream(@ptrCast(*[*:0]u8, &text), allocator);
     var top_node = try codegen.parse(&token_stream, allocator);
     try codegen.codegen(top_node);
 }
