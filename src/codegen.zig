@@ -7,14 +7,15 @@ const Type = data.Type;
 const TypeKind = data.TypeKind;
 const Token = data.Token;
 const TokenKind = data.TokenKind;
+const File = std.fs.File;
+const Writer = std.io.Writer;
 const span = std.mem.span;
 const panic = std.debug.panic;
 const crypto = std.crypto;
 const stdout = std.io.getStdOut();
 const ascii = std.ascii;
-
-fn printLine(comptime format: []const u8, args: anytype) !void {
-    var writer = stdout.writer();
+fn printLine(f: File, comptime format: []const u8, args: anytype) !void {
+    var writer = f.writer();
     try writer.print(format, args);
     try writer.print("\n", .{});
 }
@@ -660,17 +661,18 @@ const fn_epilogue =
 // At the end of this, X0 will have the addr
 // of the variable being loaded
 fn gen_addr(node: *Node, ctx: *CodegenContext) !void {
+    var out_file = ctx.out_file;
     switch (node.kind) {
         NodeKind.Var => {
             var variable = node.variable.?;
             if (variable.is_local) {
                 var offset = node.variable.?.offset;
-                try printLine(";; variable {s} at offset {}", .{ node.variable.?.name, offset });
-                try printLine("add x0, x29, #-{}", .{offset});
+                try printLine(out_file, ";; variable {s} at offset {}", .{ node.variable.?.name, offset });
+                try printLine(out_file, "add x0, x29, #-{}", .{offset});
             } else {
-                try printLine(";; loading global variable {s}'s addr at x0", .{variable.name});
-                try printLine("adrp x0, {s}@PAGE", .{variable.name});
-                try printLine("add x0, x0, {s}@PAGEOFF", .{variable.name});
+                try printLine(out_file, ";; loading global variable {s}'s addr at x0", .{variable.name});
+                try printLine(out_file, "adrp x0, {s}@PAGE", .{variable.name});
+                try printLine(out_file, "add x0, x0, {s}@PAGEOFF", .{variable.name});
             }
         },
         // I don't know how we can pass a node of type `deref` to gen_addr yet.
@@ -689,18 +691,21 @@ var args_regs_32 = [_][]const u8{ "w0", "w1", "w2", "w3", "w4", "w5", "w6", "w7"
 
 // ** Code-Generation ** //
 fn push(ctx: *CodegenContext) !void {
+    var out_file = ctx.out_file;
     ctx.stack_depth += 1;
-    try printLine("str X0, [sp, -16]", .{});
-    try printLine("sub sp, sp, #16", .{});
+    try printLine(out_file, "str X0, [sp, -16]", .{});
+    try printLine(out_file, "sub sp, sp, #16", .{});
 }
 fn pop(reg: []const u8, ctx: *CodegenContext) !void {
+    var out_file = ctx.out_file;
     ctx.stack_depth -= 1;
-    try printLine("ldr {s}, [sp]", .{reg});
-    try printLine("add sp, sp, #16", .{});
+    try printLine(out_file, "ldr {s}, [sp]", .{reg});
+    try printLine(out_file, "add sp, sp, #16", .{});
 }
 
 // from an address in x0, load a value into x0
-fn load(ty: *const Type) anyerror!void {
+fn load(ty: *const Type, ctx: *CodegenContext) anyerror!void {
+    var out_file = ctx.out_file;
     if (ty.kind == TypeKind.Array) {
         // If it is an array, do not attempt to load a value to the
         // register because in general we can't load an entire array to a
@@ -711,40 +716,42 @@ fn load(ty: *const Type) anyerror!void {
         return;
     }
     if (ty.size == 1) {
-        try printLine("ldr w0, [x0]", .{});
+        try printLine(out_file, "ldr w0, [x0]", .{});
     } else {
-        try printLine("ldr x0, [x0]", .{});
+        try printLine(out_file, "ldr x0, [x0]", .{});
     }
 }
 
 // Store x0 to an address that the stack top is pointing to.
 fn store(reg: []const u8, ty: *const Type, ctx: *CodegenContext) anyerror!void {
+    var out_file = ctx.out_file;
     try pop(reg, ctx);
     if (ty.size == 1) {
-        try printLine("strb w0, [{s}]\n", .{reg});
+        try printLine(out_file, "strb w0, [{s}]\n", .{reg});
     } else {
-        try printLine("str x0, [{s}]\n", .{reg});
+        try printLine(out_file, "str x0, [{s}]\n", .{reg});
     }
 }
 // Code generation
 // Depending on the kind of node, the state of registers might
 // vary
 pub fn gen_expr(node: *Node, ctx: *CodegenContext) anyerror!void {
+    var out_file = ctx.out_file;
     if (node.kind == NodeKind.Num) {
-        try printLine(";; loading immediate {} at", .{node.val});
-        try printLine("mov X0, {}", .{node.val});
+        try printLine(out_file, ";; loading immediate {} at", .{node.val});
+        try printLine(out_file, "mov X0, {}", .{node.val});
     } else if (node.kind == NodeKind.Var) {
         try gen_addr(node, ctx); //x0 has address of variable
-        try load(node.n_type.?);
+        try load(node.n_type.?, ctx);
     } else if (node.kind == NodeKind.Addr) {
         try gen_addr(node.lhs.?, ctx); // node should be something like a var whose address we can obtain
     } else if (node.kind == NodeKind.Deref) {
         try gen_expr(node.lhs.?, ctx); // x0 now should have an address (from a variable ideally)
-        try load(node.n_type.?);
+        try load(node.n_type.?, ctx);
         //TODO: This should be neg, not Unary
     } else if (node.kind == NodeKind.Unary) {
         try gen_expr(node.lhs.?, ctx);
-        try printLine("neg x0, x0", .{});
+        try printLine(out_file, "neg x0, x0", .{});
     } else if (node.kind == NodeKind.Assign) {
         try gen_addr(node.lhs.?, ctx); //x0 has addr of variable
         try push(ctx); //push x0 into stack
@@ -775,7 +782,7 @@ pub fn gen_expr(node: *Node, ctx: *CodegenContext) anyerror!void {
         // a relocatable object, the object file will have the symbol _badaxe
         // Until we figure out how we can fix it , lets just prefix all
         // function names with an `_`
-        try printLine("bl _{s}", .{node.fn_name});
+        try printLine(out_file, "bl _{s}", .{node.fn_name});
     } else {
 
         // Idea, gen_expr, returns which register the end value of that expr is in
@@ -791,33 +798,33 @@ pub fn gen_expr(node: *Node, ctx: *CodegenContext) anyerror!void {
         // into that reg and then cross out that register as occupied
         switch (node.kind) {
             NodeKind.Add => {
-                try printLine("add x0, x1, x0", .{});
+                try printLine(out_file, "add x0, x1, x0", .{});
             },
             NodeKind.Sub => {
-                try printLine("sub x0, x0, x1", .{});
+                try printLine(out_file, "sub x0, x0, x1", .{});
             },
             // This should be smul x0, w0, w1
             NodeKind.Mul => {
-                try printLine("mul x0, x0, x1", .{});
+                try printLine(out_file, "mul x0, x0, x1", .{});
             },
             NodeKind.Div => {
-                try printLine("sdiv x0, x0, x1", .{});
+                try printLine(out_file, "sdiv x0, x0, x1", .{});
             },
             NodeKind.Eq => {
-                try printLine("cmp x0, x1", .{});
-                try printLine("cset x0, eq", .{});
+                try printLine(out_file, "cmp x0, x1", .{});
+                try printLine(out_file, "cset x0, eq", .{});
             },
             NodeKind.Neq => {
-                try printLine("cmp x0, x1", .{});
-                try printLine("cset x0, ne", .{});
+                try printLine(out_file, "cmp x0, x1", .{});
+                try printLine(out_file, "cset x0, ne", .{});
             },
             NodeKind.Lt => {
-                try printLine("cmp x0, x1", .{});
-                try printLine("cset x0, lt", .{});
+                try printLine(out_file, "cmp x0, x1", .{});
+                try printLine(out_file, "cset x0, lt", .{});
             },
             NodeKind.Lte => {
-                try printLine("cmp x0, x1", .{});
-                try printLine("cset x0, le", .{});
+                try printLine(out_file, "cmp x0, x1", .{});
+                try printLine(out_file, "cset x0, le", .{});
             },
             else => {
                 panic("we shouldn't be here at all", .{});
@@ -827,6 +834,7 @@ pub fn gen_expr(node: *Node, ctx: *CodegenContext) anyerror!void {
 }
 
 fn gen_stmt(n: *Node, ctx: *CodegenContext) !void {
+    var out_file = ctx.out_file;
     switch (n.kind) {
         NodeKind.If => {
             try gen_expr(n.cond.?, ctx);
@@ -834,38 +842,38 @@ fn gen_stmt(n: *Node, ctx: *CodegenContext) !void {
             // if x0 is != 1, then cond => false hence
             // we jump to else
             var branch_id = update_branch_count(ctx);
-            try printLine("cmp x0, #0", .{});
+            try printLine(out_file, "cmp x0, #0", .{});
             //TODO: Add fn name as prefix to branch tag
-            try printLine("b.eq else_label_{}", .{branch_id});
+            try printLine(out_file, "b.eq else_label_{}", .{branch_id});
 
             try gen_stmt(n.then.?, ctx);
 
-            try printLine("b.eq else_label_{}", .{branch_id});
+            try printLine(out_file, "b.eq else_label_{}", .{branch_id});
 
-            try printLine("b end_label_{}", .{branch_id});
-            try printLine("else_label_{}:", .{branch_id});
+            try printLine(out_file, "b end_label_{}", .{branch_id});
+            try printLine(out_file, "else_label_{}:", .{branch_id});
             if (n.els) |else_stmt| {
                 try gen_stmt(else_stmt, ctx);
             }
-            try printLine("end_label_{}:", .{branch_id});
+            try printLine(out_file, "end_label_{}:", .{branch_id});
         },
         NodeKind.For => {
             var branch_id = update_branch_count(ctx);
             if (n.init) |for_init| {
                 try gen_stmt(for_init, ctx);
             }
-            try printLine("for_label{}:", .{branch_id});
+            try printLine(out_file, "for_label{}:", .{branch_id});
             if (n.cond) |for_cond| {
                 try gen_expr(for_cond, ctx);
-                try printLine("cmp x0, #0", .{});
-                try printLine("b.eq for_end_label{}", .{branch_id});
+                try printLine(out_file, "cmp x0, #0", .{});
+                try printLine(out_file, "b.eq for_end_label{}", .{branch_id});
             }
             try gen_stmt(n.then.?, ctx);
             if (n.inc) |inc| {
                 try gen_expr(inc, ctx);
             }
-            try printLine("b for_label{}", .{branch_id});
-            try printLine("for_end_label{}:", .{branch_id});
+            try printLine(out_file, "b for_label{}", .{branch_id});
+            try printLine(out_file, "for_end_label{}:", .{branch_id});
         },
         NodeKind.Block => {
             var maybe_it = n.body;
@@ -880,7 +888,7 @@ fn gen_stmt(n: *Node, ctx: *CodegenContext) !void {
         },
         NodeKind.Ret => {
             try gen_expr(n.lhs.?, ctx);
-            try printLine("b return_label._{s}", .{ctx.current_func.name});
+            try printLine(out_file, "b return_label._{s}", .{ctx.current_func.name});
             return;
         },
         else => {
@@ -888,41 +896,41 @@ fn gen_stmt(n: *Node, ctx: *CodegenContext) !void {
         },
     }
 }
-const CodegenContext = struct { current_func: Function, branch_count: u32 = 0, stack_depth: usize = 0 };
-pub fn emit_text(objs: std.ArrayList(Obj)) !void {
+const CodegenContext = struct { current_func: Function, branch_count: u32 = 0, stack_depth: usize = 0, out_file: File };
+pub fn emit_text(objs: std.ArrayList(Obj), out_file: File) !void {
     assign_lvar_offsets(objs);
 
-    try printLine(" .globl _main", .{});
-    try printLine(".text", .{});
-    try printLine(".align 4", .{});
+    try printLine(out_file, " .globl _main", .{});
+    try printLine(out_file, ".text", .{});
+    try printLine(out_file, ".align 4", .{});
 
     for (objs.items) |*obj| {
         if (obj.kind != ObjKind.Function) {
             continue;
         }
         var f = obj.payload.function;
-        var codegen_ctx = CodegenContext{ .current_func = f };
-        try printLine(".globl _{s}", .{f.name});
-        try printLine("_{s}:", .{f.name});
+        var codegen_ctx = CodegenContext{ .current_func = f, .out_file = out_file };
+        try printLine(out_file, ".globl _{s}", .{f.name});
+        try printLine(out_file, "_{s}:", .{f.name});
 
-        try printLine("{s}", .{fn_prologue});
-        try printLine(";; making space for local variables in stack", .{});
-        try printLine(";; stack space for {s} is {}", .{ f.name, f.stack_size });
+        try printLine(out_file, "{s}", .{fn_prologue});
+        try printLine(out_file, ";; making space for local variables in stack", .{});
+        try printLine(out_file, ";; stack space for {s} is {}", .{ f.name, f.stack_size });
 
-        try printLine("sub sp, sp, #{}", .{f.stack_size});
+        try printLine(out_file, "sub sp, sp, #{}", .{f.stack_size});
         for (f.params.items) |p, i| {
             if (p.typ.size == 1) {
-                try printLine("strb {s}, [x29, -{}]", .{ args_regs_32[i], p.offset });
+                try printLine(out_file, "strb {s}, [x29, -{}]", .{ args_regs_32[i], p.offset });
             } else {
-                try printLine("str {s}, [x29, -{}]", .{ args_regs[i], p.offset });
+                try printLine(out_file, "str {s}, [x29, -{}]", .{ args_regs[i], p.offset });
             }
         }
 
         try gen_stmt(f.fnbody, &codegen_ctx);
-        try printLine("add sp, sp, #{}", .{f.stack_size});
+        try printLine(out_file, "add sp, sp, #{}", .{f.stack_size});
 
-        try printLine("return_label._{s}:", .{f.name});
-        try printLine("{s}", .{fn_epilogue});
+        try printLine(out_file, "return_label._{s}:", .{f.name});
+        try printLine(out_file, "{s}", .{fn_epilogue});
     }
 }
 
@@ -1228,31 +1236,33 @@ const ObjPayload = union { variable: *Variable, function: Function };
 const Obj = struct { kind: ObjKind, payload: ObjPayload };
 const ObjList = std.ArrayList(Obj);
 
-fn emit_data(objs: ObjList) !void {
-    try printLine(".data", .{});
+fn emit_data(objs: ObjList, out_file: File) !void {
+    try printLine(out_file, ".data", .{});
 
     for (objs.items) |*obj| {
         if (obj.kind != ObjKind.Variable) {
             continue;
         }
         var v = obj.payload.variable;
-        try printLine(".globl {s}", .{v.name});
+        try printLine(out_file, ".globl {s}", .{v.name});
         if (v.init_data) |var_data| {
-            try printLine("{s}:", .{v.name});
+            try printLine(out_file, "{s}:", .{v.name});
             var i: usize = 0;
             while (i < var_data.len) : (i += 1) {
-                try printLine(".byte {d}", .{var_data[i]});
+                try printLine(out_file, ".byte {d}", .{var_data[i]});
             }
         } else {
-            try printLine("{s}: .skip {},0 ", .{ v.name, v.typ.size });
+            try printLine(out_file, "{s}: .skip {},0 ", .{ v.name, v.typ.size });
         }
     }
 }
 
-pub fn codegen(objs: std.ArrayList(Obj)) !void {
+pub fn codegen(objs: std.ArrayList(Obj), out_file_name: []const u8) !void {
     assign_lvar_offsets(objs);
-    try emit_data(objs);
-    try emit_text(objs);
+    var out_file = try std.fs.cwd().createFile(out_file_name, .{});
+    defer out_file.close();
+    try emit_data(objs, out_file);
+    try emit_text(objs, out_file);
 }
 
 //lookahead functions parse the stream for a certain construct

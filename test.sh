@@ -5,7 +5,7 @@ assert() {
   expected="$1"
   input="$2"
 
-  echo "$input" | ./zig-out/bin/chibicc-zig - > tmp.s || exit
+  echo "$input" | ./zig-out/bin/chibicc-zig -o tmp.s - || exit
   as -arch arm64 -o tmp.asm tmp.s
   ld -o tmp tmp.asm tmp2.o -lSystem -syslibroot `xcrun -sdk macosx --show-sdk-path` -e _main -arch arm64
   ./tmp
