@@ -9,6 +9,7 @@ const Token = data.Token;
 const TokenKind = data.TokenKind;
 const File = std.fs.File;
 const Writer = std.io.Writer;
+const ArrayList = std.ArrayList;
 const span = std.mem.span;
 const panic = std.debug.panic;
 const crypto = std.crypto;
@@ -42,22 +43,20 @@ const Variable = struct {
     //apart from a boolean
     is_local: bool = false,
     const Self = @This();
-    fn alloc_obj(alloc: Allocator, name: []const u8, ty: *Type, local: bool) !*Variable {
-        var obj = try alloc.create(Self);
-        obj.offset = 0;
-        obj.name = try alloc.dupe(u8, name);
-        obj.typ = ty;
-        obj.is_local = local;
-        return obj;
-    }
-    fn localVar(alloc: Allocator, name: []const u8, ty: *Type) !*Variable {
+
+    fn localVar(alloc: Allocator, variable_list: *VariableList, scope_stack: ScopeStack, name: []const u8, ty: *Type) !*Variable {
         var variable = try alloc.create(Self);
         variable.* = Self{ .offset = 0, .name = try alloc.dupe(u8, name), .typ = ty, .is_local = true };
+        try variable_list.insert(0, variable);
+        try pushIntoScope(scope_stack, name, variable);
         return variable;
     }
-    fn globalVar(alloc: Allocator, name: []const u8, ty: *Type) !*Variable {
+    fn globalVar(alloc: Allocator, variable_list: *VariableList, scope_stack: ScopeStack, name: []const u8, ty: *Type) !*Variable {
         var variable = try alloc.create(Self);
         variable.* = Self{ .offset = 0, .name = try alloc.dupe(u8, name), .typ = ty, .is_local = false };
+        try variable_list.insert(0, variable);
+        try pushIntoScope(scope_stack, name, variable);
+
         return variable;
     }
 };
@@ -314,6 +313,7 @@ fn primary(p: *ParseContext) anyerror!*Node {
                     return fncall(p);
                 }
                 var variable: *Variable = undefined;
+
                 if (findVar(p, v.ptr)) |local_var| {
                     variable = local_var;
                 } else {
@@ -332,7 +332,7 @@ fn primary(p: *ParseContext) anyerror!*Node {
                 var string_len = v.ptr.len;
                 // when calculating string_len include a byte for the terminating \0
                 var string_type = try Type.array_of(p.alloc, &CharBaseType, string_len + 1, top_token);
-                var string_var = try Variable.globalVar(p.alloc, try unique_name(p.alloc), string_type);
+                var string_var = try Variable.globalVar(p.alloc, &p.locals, p.scopes, try unique_name(p.alloc), string_type);
                 string_var.init_data = v.ptr;
                 var global_obj = Obj{ .kind = ObjKind.Variable, .payload = ObjPayload{ .variable = string_var } };
                 try p.globals.insert(0, global_obj);
@@ -582,6 +582,7 @@ fn compound_statement(p: *ParseContext) anyerror!*Node {
     var it = first_stmt;
     var stream = p.stream;
     var s_top = stream.top();
+    try enterScope(p);
     while (stream.top().equal(&data.RBRACE) == false) {
         var statement = if (Type.isTypename(stream.top())) try declaration(p) else try stmt(p);
         add_type(p.alloc, statement);
@@ -593,6 +594,7 @@ fn compound_statement(p: *ParseContext) anyerror!*Node {
             it = statement;
         }
     }
+    exitScope(p);
     var compound_stmt_node = try Node.from_block(p.alloc, first_stmt, s_top);
     stream.advance();
     return compound_stmt_node;
@@ -603,14 +605,16 @@ pub fn function(p: *ParseContext, return_typ: *Type) !void {
     var typ = try declarator(p, return_typ);
     // p.locals must always be empty before this
     var param_vars = VariableList.init(p.alloc);
-    try create_param_lvars(p.alloc, typ.params, &param_vars);
+    try enterScope(p);
+    try create_param_lvars(p.alloc, typ.params, &param_vars, p.scopes);
+    // Add variables in parameters list of fn to local vars list in
+    // the fn
     for (param_vars.items) |param| {
         try p.locals.insert(0, param);
     }
-
     p.stream.skip(&data.LBRACE);
     var fn_statements = try compound_statement(p);
-
+    exitScope(p);
     var f = Function{ .stack_size = 0, .name = Token.get_ident(typ.tok), .fnbody = fn_statements, .locals = p.locals, .params = param_vars };
     try p.globals.insert(0, Obj{ .kind = ObjKind.Function, .payload = ObjPayload{ .function = f } });
 }
@@ -623,7 +627,7 @@ pub fn global_variable(p: *ParseContext, base_type: *Type) !void {
             s.skip(&data.COMMA);
         }
         var variable_type = try declarator(p, base_type);
-        try variables.insert(0, try Variable.globalVar(p.alloc, variable_type.tok.get_ident(), variable_type));
+        try variables.insert(0, try Variable.globalVar(p.alloc, &p.locals, p.scopes, variable_type.tok.get_ident(), variable_type));
     }
     for (variables.items) |v| {
         try p.globals.insert(0, Obj{ .kind = ObjKind.Variable, .payload = ObjPayload{ .variable = v } });
@@ -632,7 +636,11 @@ pub fn global_variable(p: *ParseContext, base_type: *Type) !void {
 }
 pub fn parse(s: *Stream, alloc: Allocator) !std.ArrayList(Obj) {
     // Should `locals` also be ObjList or can it just be a VariableList (ie) can C have nested structs and functions ?
-    var parse_context = ParseContext{ .stream = s, .alloc = alloc, .locals = VariableList.init(alloc), .globals = ObjList.init(alloc) };
+    //
+    var scope_stack = ScopeStack.init(alloc);
+    // Create and push an initial Scope for global vars
+    try scope_stack.append(Scope{ .objs = VarScopeList.init(alloc) });
+    var parse_context = ParseContext{ .stream = s, .alloc = alloc, .locals = VariableList.init(alloc), .globals = ObjList.init(alloc), .scopes = scope_stack };
     while (!s.is_eof()) {
         var decl = declspec(&parse_context);
         if (lookahead_is_function(&parse_context)) {
@@ -898,8 +906,6 @@ fn gen_stmt(n: *Node, ctx: *CodegenContext) !void {
 }
 const CodegenContext = struct { current_func: Function, branch_count: u32 = 0, stack_depth: usize = 0, out_file: File };
 pub fn emit_text(objs: std.ArrayList(Obj), out_file: File) !void {
-    assign_lvar_offsets(objs);
-
     try printLine(out_file, " .globl _main", .{});
     try printLine(out_file, ".text", .{});
     try printLine(out_file, ".align 4", .{});
@@ -934,7 +940,7 @@ pub fn emit_text(objs: std.ArrayList(Obj), out_file: File) !void {
     }
 }
 
-const ParseContext = struct { stream: *Stream, alloc: Allocator, locals: VariableList, globals: std.ArrayList(Obj) };
+const ParseContext = struct { stream: *Stream, alloc: Allocator, locals: VariableList, globals: std.ArrayList(Obj), scopes: ScopeStack };
 const Function = struct { fnbody: *Node, locals: VariableList, stack_size: usize, name: []const u8, params: VariableList };
 
 fn align_to(n: usize, al: u32) usize {
@@ -959,28 +965,17 @@ fn assign_lvar_offsets(objs: std.ArrayList(Obj)) void {
     }
 }
 
-fn find_local_var(ident: []const u8, locals: VariableList) ?*Variable {
-    for (locals.items) |l| {
-        if (std.mem.eql(u8, l.name, ident)) {
-            return l;
-        }
-    }
-    return null;
-}
-
 fn findVar(p: *ParseContext, ident: []const u8) ?*Variable {
-    if (find_local_var(ident, p.locals)) |v| {
-        return v;
-    }
-    for (p.globals.items) |g| {
-        if (g.kind != ObjKind.Variable) {
-            continue;
+    var scopes = p.scopes;
+    var idx: usize = 0;
+    while (idx < scopes.items.len) : (idx += 1) {
+        var objs = scopes.items[idx].objs.items;
+        for (objs) |obj| {
+            if (std.mem.eql(u8, ident, obj.name)) {
+                return obj.variable;
+            }
         }
-        if (std.mem.eql(u8, ident, g.payload.variable.name)) {
-            return g.payload.variable;
-        }
     }
-
     return null;
 }
 fn update_branch_count(ctx: *CodegenContext) u32 {
@@ -1120,8 +1115,8 @@ fn declaration(p: *ParseContext) !*Node {
         i += 1;
         var top = s.top();
         var typ = try declarator(p, base_type);
-        var identifier = try Variable.localVar(p.alloc, typ.tok.get_ident(), typ);
-        try p.locals.insert(0, identifier);
+        // equivalent to new_lvar in chibicc
+        var identifier = try Variable.localVar(p.alloc, &p.locals, p.scopes, typ.tok.get_ident(), typ);
         var lhs = try Node.from_ident(p.alloc, identifier, typ.tok);
 
         if (s.top().equal(&data.ASSIGN) == false) { // check if token is "="
@@ -1222,18 +1217,21 @@ fn type_suffix(p: *ParseContext, return_type: *Type) anyerror!*Type {
 }
 
 // create variables fn func parameters
-fn create_param_lvars(alloc: Allocator, params_decl_list: ?std.ArrayList(*Type), vars_list: *VariableList) !void {
+fn create_param_lvars(alloc: Allocator, params_decl_list: ?std.ArrayList(*Type), vars_list: *VariableList, scope_stack: ScopeStack) !void {
     if (params_decl_list) |decl_list| {
         for (decl_list.items) |d| {
-            var arg = try Variable.localVar(alloc, d.tok.get_ident(), d);
-            try vars_list.insert(0, arg);
+            _ = try Variable.localVar(alloc, vars_list, scope_stack, d.tok.get_ident(), d);
         }
     }
 }
 
 const ObjKind = enum { Function, Variable };
 const ObjPayload = union { variable: *Variable, function: Function };
-const Obj = struct { kind: ObjKind, payload: ObjPayload };
+const Obj = struct {
+    kind: ObjKind,
+    payload: ObjPayload,
+    const Self = @This();
+};
 const ObjList = std.ArrayList(Obj);
 
 fn emit_data(objs: ObjList, out_file: File) !void {
@@ -1296,4 +1294,34 @@ fn unique_name(a: Allocator) ![]const u8 {
         }
     }
     return name_buf[0..10];
+}
+
+const VarScope = struct {
+    name: []const u8,
+    variable: *Variable,
+};
+const VarScopeList = ArrayList(VarScope);
+const Scope = struct {
+    objs: VarScopeList,
+    const Self = @This();
+    pub fn fromAlloc(alloc: Allocator) *Self {
+        var self = try alloc.create(Self);
+        self.variables = ArrayList(VarScope).init(alloc);
+        return self;
+    }
+};
+const ScopeStack = ArrayList(Scope);
+fn enterScope(p: *ParseContext) !void {
+    try p.scopes.insert(0, Scope{ .objs = VarScopeList.init(p.alloc) });
+}
+
+fn exitScope(p: *ParseContext) void {
+    _ = p.scopes.orderedRemove(0);
+}
+// named push_scope in chibicc
+// scope_stack is a pointer as I cannot append to a non-pointer ScopeStack
+// as ScopeStack is a const when passed via fn params
+pub fn pushIntoScope(scope_stack: ScopeStack, name: []const u8, variable: *Variable) !void {
+    //var stack_top = scope_stack.items[0];
+    try scope_stack.items[0].objs.insert(0, VarScope{ .name = name, .variable = variable });
 }
