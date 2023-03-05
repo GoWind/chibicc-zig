@@ -103,9 +103,14 @@ pub fn tokenize(stream_p: *[*:0]u8, list: *TokenList, alloc: Allocator) !void {
             // Identifiers and Keywords
         } else if (stream[0] == '"') {
             var literal = try readStringLiteral(&stream);
-            var buffer = try alloc.alloc(u8, literal.len);
-            var skippedLiteral = skipEscapedChars(literal, buffer);
-            try list.append(Token{ .StringLiteral = .{ .ptr = skippedLiteral } });
+            var buffer = try alloc.alloc(u8, literal.len + 1);
+            if (literal.len != 0) {
+                var skippedLiteral = skipEscapedChars(literal, buffer);
+                try list.append(Token{ .StringLiteral = .{ .ptr = skippedLiteral } });
+            } else {
+                buffer[0] = 0;
+                try list.append(Token{ .StringLiteral = .{ .ptr = buffer } });
+            }
         } else if (isIdent1(stream[0])) {
             var nextIdx: usize = 1;
             while (isIdent2(stream[0 + nextIdx])) {
@@ -171,6 +176,9 @@ fn readStringLiteral(sp: *[*:0]const u8) ![]const u8 {
     while (s[idx] != '"') : (idx += 1) {
         if (s[idx] == '\n' or s[idx] == 0) {
             std.debug.panic("Unclosed literal newline or null char at {s}\n", .{s[idx - 2 .. idx]});
+        }
+        if (s[idx] == '\\') {
+            idx += 1;
         }
     }
     //idx now points to the trailing "
@@ -280,6 +288,9 @@ fn skipEscapedChars(source: []const u8, dest: []u8) []const u8 {
         }
         output_idx += 1;
     }
+    //Gov: experimenting
+    dest[output_idx] = 0; // add terminating null
+    output_idx += 1;
     return dest[0..output_idx];
 }
 

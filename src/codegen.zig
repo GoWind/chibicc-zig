@@ -15,6 +15,7 @@ const panic = std.debug.panic;
 const crypto = std.crypto;
 const stdout = std.io.getStdOut();
 const ascii = std.ascii;
+const Random = std.rand.Random;
 fn printLine(f: File, comptime format: []const u8, args: anytype) !void {
     var writer = f.writer();
     try writer.print(format, args);
@@ -330,9 +331,8 @@ fn primary(p: *ParseContext) anyerror!*Node {
             },
             TokenKind.StringLiteral => |v| {
                 var string_len = v.ptr.len;
-                // when calculating string_len include a byte for the terminating \0
-                var string_type = try Type.array_of(p.alloc, &CharBaseType, string_len + 1, top_token);
-                var string_var = try Variable.globalVar(p.alloc, &p.locals, p.scopes, try unique_name(p.alloc), string_type);
+                var string_type = try Type.array_of(p.alloc, &CharBaseType, string_len, top_token);
+                var string_var = try Variable.globalVar(p.alloc, &p.locals, p.scopes, try unique_name(p), string_type);
                 string_var.init_data = v.ptr;
                 var global_obj = Obj{ .kind = ObjKind.Variable, .payload = ObjPayload{ .variable = string_var } };
                 try p.globals.insert(0, global_obj);
@@ -640,7 +640,13 @@ pub fn parse(s: *Stream, alloc: Allocator) !std.ArrayList(Obj) {
     var scope_stack = ScopeStack.init(alloc);
     // Create and push an initial Scope for global vars
     try scope_stack.append(Scope{ .objs = VarScopeList.init(alloc) });
-    var parse_context = ParseContext{ .stream = s, .alloc = alloc, .locals = VariableList.init(alloc), .globals = ObjList.init(alloc), .scopes = scope_stack };
+    var t: i64 = -1;
+    while (t < 0) {
+        t = std.time.milliTimestamp();
+    }
+    var prng = std.rand.DefaultPrng.init(@intCast(u64, t));
+    var pr = &prng.random();
+    var parse_context = ParseContext{ .stream = s, .alloc = alloc, .locals = VariableList.init(alloc), .globals = ObjList.init(alloc), .scopes = scope_stack, .prng = pr };
     while (!s.is_eof()) {
         var decl = declspec(&parse_context);
         if (lookahead_is_function(&parse_context)) {
@@ -701,8 +707,10 @@ var args_regs_32 = [_][]const u8{ "w0", "w1", "w2", "w3", "w4", "w5", "w6", "w7"
 fn push(ctx: *CodegenContext) !void {
     var out_file = ctx.out_file;
     ctx.stack_depth += 1;
+    try printLine(out_file, ";; pushing x0 into stack", .{});
     try printLine(out_file, "str X0, [sp, -16]", .{});
     try printLine(out_file, "sub sp, sp, #16", .{});
+    try printLine(out_file, ";; end of push", .{});
 }
 fn pop(reg: []const u8, ctx: *CodegenContext) !void {
     var out_file = ctx.out_file;
@@ -724,7 +732,7 @@ fn load(ty: *const Type, ctx: *CodegenContext) anyerror!void {
         return;
     }
     if (ty.size == 1) {
-        try printLine(out_file, "ldr w0, [x0]", .{});
+        try printLine(out_file, "ldrb w0, [x0]", .{});
     } else {
         try printLine(out_file, "ldr x0, [x0]", .{});
     }
@@ -809,6 +817,7 @@ pub fn gen_expr(node: *Node, ctx: *CodegenContext) anyerror!void {
                 try printLine(out_file, "add x0, x1, x0", .{});
             },
             NodeKind.Sub => {
+                try printLine(out_file, ";; subtraction operation", .{});
                 try printLine(out_file, "sub x0, x0, x1", .{});
             },
             // This should be smul x0, w0, w1
@@ -925,6 +934,7 @@ pub fn emit_text(objs: std.ArrayList(Obj), out_file: File) !void {
 
         try printLine(out_file, "sub sp, sp, #{}", .{f.stack_size});
         for (f.params.items) |p, i| {
+            try printLine(out_file, ";;storing fn param {} passed via reg to stack\n", .{i});
             if (p.typ.size == 1) {
                 try printLine(out_file, "strb {s}, [x29, -{}]", .{ args_regs_32[i], p.offset });
             } else {
@@ -940,7 +950,7 @@ pub fn emit_text(objs: std.ArrayList(Obj), out_file: File) !void {
     }
 }
 
-const ParseContext = struct { stream: *Stream, alloc: Allocator, locals: VariableList, globals: std.ArrayList(Obj), scopes: ScopeStack };
+const ParseContext = struct { stream: *Stream, alloc: Allocator, locals: VariableList, globals: std.ArrayList(Obj), scopes: ScopeStack, prng: *const std.rand.Random };
 const Function = struct { fnbody: *Node, locals: VariableList, stack_size: usize, name: []const u8, params: VariableList };
 
 fn align_to(n: usize, al: u32) usize {
@@ -1283,14 +1293,22 @@ fn lookahead_is_function(p: *ParseContext) bool {
     return dummy.kind == TypeKind.Func;
 }
 
-fn unique_name(a: Allocator) ![]const u8 {
+fn unique_name(p: *ParseContext) ![]const u8 {
+    var a = p.alloc;
     var name_buf = try a.alloc(u8, 10);
-    crypto.random.bytes(name_buf[0..10]);
     var i: usize = 0;
     // A hack to
-    while (i < 10) : (i += 1) {
-        if (!ascii.isAlpha(name_buf[i])) {
-            name_buf[i] = 'd' + @intCast(u8, i);
+    while (i < 10) {
+        var c = p.prng.int(u8);
+
+        if ((c >= 65 and c <= 90) or (c >= 97 and c <= 122)) {
+            if (i == 0 and c == 'L') {
+                // https://trac.macports.org/ticket/61398
+                // clang doesn't like symbols starting with 'L'
+                continue;
+            }
+            name_buf[i] = c;
+            i += 1;
         }
     }
     return name_buf[0..10];
