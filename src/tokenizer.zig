@@ -3,6 +3,7 @@ const data = @import("data.zig");
 const Token = data.Token;
 const TokenList = data.TokenList;
 const TokenKind = data.TokenKind;
+const TokenPayload = data.TokenPayload;
 const Allocator = std.mem.Allocator;
 const span = std.mem.span;
 const panic = std.debug.panic;
@@ -30,7 +31,7 @@ pub const Stream = struct {
         if (self.idx >= self.ts.items.len) {
             return true;
         }
-        switch (self.ts.items[self.idx]) {
+        switch (self.ts.items[self.idx].token_payload) {
             TokenKind.Eof => {
                 return true;
             },
@@ -81,35 +82,46 @@ pub const Stream = struct {
 // populates the TokenList with tokens from the program string
 // Do not use the TokenList directly. Use the Stream instead.
 pub fn tokenize(stream_p: *[*:0]u8, list: *TokenList, alloc: Allocator) !void {
+    var line_no: usize = 1;
     var stream = stream_p.*;
     while (stream[0] != 0) {
         if (stream[0] == '/' and stream[1] == '/') {
             stream += 2;
             while (stream[0] != '\n') : (stream += 1) {}
+            line_no += 1;
         } else if (stream[0] == '/' and stream[1] == '*') {
             stream += 2;
             while (!(stream[0] == '*' and stream[1] == '/')) {
+                if (stream[0] == '\n') {
+                    line_no += 1;
+                }
                 stream += 1;
             }
             stream += 2;
         } else if (ascii.isSpace(stream[0]) == true) {
             stream += 1;
+            if (stream[0] == '\n') {
+                line_no += 1;
+            }
             continue;
             // Numbers
         } else if (ascii.isDigit(stream[0]) == true) {
             // Notice that we are mutating `stream` here
             var number = strtol(&stream);
-            try list.append(Token{ .Num = .{ .val = number.? } });
+            try list.append(Token{ .line_no = line_no, .token_payload = TokenPayload{ .Num = .{ .val = number.? } } });
             // Identifiers and Keywords
         } else if (stream[0] == '"') {
+            // For now string literals can't be multi-line, so no problems
+            // incrementing line numbers when parsing a string literal
             var literal = try readStringLiteral(&stream);
+            // allocate space for an extra null character at the end
             var buffer = try alloc.alloc(u8, literal.len + 1);
             if (literal.len != 0) {
                 var skippedLiteral = skipEscapedChars(literal, buffer);
-                try list.append(Token{ .StringLiteral = .{ .ptr = skippedLiteral } });
+                try list.append(Token{ .line_no = line_no, .token_payload = TokenPayload{ .StringLiteral = .{ .ptr = skippedLiteral } } });
             } else {
                 buffer[0] = 0;
-                try list.append(Token{ .StringLiteral = .{ .ptr = buffer } });
+                try list.append(Token{ .line_no = line_no, .token_payload = TokenPayload{ .StringLiteral = .{ .ptr = buffer } } });
             }
         } else if (isIdent1(stream[0])) {
             var nextIdx: usize = 1;
@@ -121,20 +133,20 @@ pub fn tokenize(stream_p: *[*:0]u8, list: *TokenList, alloc: Allocator) !void {
             // of if there is a clear advantage to converting idents to keywords
             // later once all tokens are scanned
             var t = if (Token.isKeyword(stream[0..nextIdx]))
-                Token{ .Keyword = .{ .ptr = stream[0..nextIdx] } }
+                Token{ .line_no = line_no, .token_payload = TokenPayload{ .Keyword = .{ .ptr = stream[0..nextIdx] } } }
             else
-                Token{ .Ident = .{ .ptr = stream[0..nextIdx] } };
+                Token{ .line_no = line_no, .token_payload = TokenPayload{ .Ident = .{ .ptr = stream[0..nextIdx] } } };
             try list.append(t);
             stream += nextIdx;
         } else if (readPunct(span(stream)) > 0) {
             var punct_len = readPunct(span(stream));
-            try list.append(Token{ .Punct = .{ .ptr = stream[0..punct_len] } });
+            try list.append(Token{ .line_no = line_no, .token_payload = TokenPayload{ .Punct = .{ .ptr = stream[0..punct_len] } } });
             stream += punct_len;
         } else {
             panic("Invalid token {c} from {s}\n", .{ stream[0], stream });
         }
     }
-    try list.append(Token.Eof);
+    try list.append(Token{ .line_no = line_no, .token_payload = TokenPayload.Eof });
 }
 
 // A slight variation of the strtol func in C std lib.

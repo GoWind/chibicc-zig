@@ -308,7 +308,7 @@ fn primary(p: *ParseContext) anyerror!*Node {
         var size_as_u32 = @truncate(u32, unary_node.n_type.?.size);
         return try Node.from_num(p.alloc, @intCast(i32, size_as_u32), top_token);
     } else {
-        switch (top_token.*) {
+        switch (top_token.*.token_payload) {
             TokenKind.Ident => |v| {
                 if (s.next().?.equal(&data.LPAREN)) { // fn call
                     return fncall(p);
@@ -1164,7 +1164,7 @@ fn declarator(p: *ParseContext, typ: *Type) !*Type {
         actual_type = try Type.pointer_to(p.alloc, actual_type, top);
     }
     top = stream.top();
-    switch (top.*) {
+    switch (top.*.token_payload) {
         TokenKind.Ident => {
             actual_type.tok = stream.top();
             stream.advance();
