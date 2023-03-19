@@ -26,7 +26,7 @@ fn printLine(f: File, comptime format: []const u8, args: anytype) !void {
 // Code emitter
 // For and while use the same kind
 // but in `while`, we disregard `inc`
-const NodeKind = enum { Add, Sub, Mul, Div, Unary, Num, Eq, Neq, Lt, Lte, ExprStmt, Assign, Var, Ret, Block, If, For, Addr, Deref, Funcall, StatementExpr };
+const NodeKind = enum { Comma, Add, Sub, Mul, Div, Unary, Num, Eq, Neq, Lt, Lte, ExprStmt, Assign, Var, Ret, Block, If, For, Addr, Deref, Funcall, StatementExpr };
 
 // this should be a const, but that makes the pointer to this a *const Type and
 // it is very annoying to change aftewards, so guess I will deal with this later
@@ -144,7 +144,7 @@ pub const Node = struct {
 
     pub fn format(self: Self, comptime _: []const u8, _: std.fmt.FormatOptions, out_stream: anytype) !void {
         switch (self.kind) {
-            NodeKind.Add, NodeKind.Sub, NodeKind.Mul, NodeKind.Div, NodeKind.Assign, NodeKind.Eq, NodeKind.Neq, NodeKind.Lt, NodeKind.Lte => {
+            NodeKind.Comma, NodeKind.Add, NodeKind.Sub, NodeKind.Mul, NodeKind.Div, NodeKind.Assign, NodeKind.Eq, NodeKind.Neq, NodeKind.Lt, NodeKind.Lte => {
                 try std.fmt.format(out_stream, "Node {?} starting at {?} with lhs {?} and rhs {?}", .{ self.kind, self.tok, self.lhs, self.rhs });
             },
             NodeKind.Unary, NodeKind.Addr, NodeKind.Deref => {
@@ -494,9 +494,17 @@ fn assign(p: *ParseContext) !*Node {
     }
     return lhs;
 }
-
+// expr = assign ("," expr)?
 fn expr(p: *ParseContext) !*Node {
-    return assign(p);
+    var assign_node = try assign(p);
+    var top = p.stream.top();
+    if (top.equal(&data.COMMA)) {
+        p.stream.advance();
+        var next_node = try expr(p);
+        var return_node = try Node.from_binary(p.alloc, NodeKind.Comma, assign_node, next_node, top);
+        return return_node;
+    }
+    return assign_node;
 }
 
 // expr-stmt = expr? ;
@@ -694,6 +702,10 @@ fn gen_addr(node: *Node, ctx: *CodegenContext) !void {
         NodeKind.Deref => {
             try gen_expr(node.lhs.?, ctx);
         },
+        NodeKind.Comma => {
+            try gen_expr(node.lhs.?, ctx);
+            try gen_addr(node.rhs.?, ctx);
+        },
         else => {
             panic("Not an lvalue {?}", .{node});
         },
@@ -771,6 +783,9 @@ pub fn gen_expr(node: *Node, ctx: *CodegenContext) anyerror!void {
     } else if (node.kind == NodeKind.Unary) {
         try gen_expr(node.lhs.?, ctx);
         try printLine(out_file, "neg x0, x0", .{});
+    } else if (node.kind == NodeKind.Comma) {
+        try gen_expr(node.lhs.?, ctx);
+        try gen_expr(node.rhs.?, ctx);
     } else if (node.kind == NodeKind.Assign) {
         try gen_addr(node.lhs.?, ctx); //x0 has addr of variable
         try push(ctx); //push x0 into stack
@@ -1090,6 +1105,9 @@ fn add_type(ally: Allocator, n: *Node) void {
             } else {
                 panic("statement expression returning void is not supported\n", .{});
             }
+        },
+        NodeKind.Comma => {
+            n.n_type = n.rhs.?.n_type;
         },
         else => {
             // We just ignore all the other types of nodes
