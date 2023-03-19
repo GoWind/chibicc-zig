@@ -753,6 +753,9 @@ fn store(reg: []const u8, ty: *const Type, ctx: *CodegenContext) anyerror!void {
 // vary
 pub fn gen_expr(node: *Node, ctx: *CodegenContext) anyerror!void {
     var out_file = ctx.out_file;
+    if (node.tok) |t| {
+        try printLine(out_file, ".loc 1 {}\n", .{t.line_no});
+    }
     if (node.kind == NodeKind.Num) {
         try printLine(out_file, ";; loading immediate {} at", .{node.val});
         try printLine(out_file, "mov X0, {}", .{node.val});
@@ -852,6 +855,9 @@ pub fn gen_expr(node: *Node, ctx: *CodegenContext) anyerror!void {
 
 fn gen_stmt(n: *Node, ctx: *CodegenContext) !void {
     var out_file = ctx.out_file;
+    if (n.tok) |t| {
+        try printLine(out_file, ".loc 1 {}\n", .{t.line_no});
+    }
     switch (n.kind) {
         NodeKind.If => {
             try gen_expr(n.cond.?, ctx);
@@ -1265,10 +1271,11 @@ fn emit_data(objs: ObjList, out_file: File) !void {
     }
 }
 
-pub fn codegen(objs: std.ArrayList(Obj), out_file_name: []const u8) !void {
+pub fn codegen(objs: std.ArrayList(Obj), out_file_name: []const u8, in_file_name: []const u8) !void {
     assign_lvar_offsets(objs);
     var out_file = try std.fs.cwd().createFile(out_file_name, .{});
     defer out_file.close();
+    try printLine(out_file, ".file 1 \"{s}\"\n", .{in_file_name});
     try emit_data(objs, out_file);
     try emit_text(objs, out_file);
 }

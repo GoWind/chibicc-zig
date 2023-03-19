@@ -35,7 +35,7 @@ pub fn main() anyerror!void {
     var text = try tokenizer.readFile(allocator, prog_args.input_file.?);
     var token_stream = try tokenizer.text_to_stream(@ptrCast(*[*:0]u8, &text), allocator);
     var top_node = try codegen.parse(&token_stream, allocator);
-    try codegen.codegen(top_node, prog_args.output_file.?);
+    try codegen.codegen(top_node, prog_args.output_file.?, prog_args.input_file.?);
 }
 
 const Args = struct { input_file: ?[]const u8, output_file: ?[]const u8 };
